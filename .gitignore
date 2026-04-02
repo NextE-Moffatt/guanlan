@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+logs/
+final_reports/
+*.html
+*.pdf
+*.log
+.venv/
+venv/
