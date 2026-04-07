@@ -12,6 +12,10 @@
 # 5. Markdown 组装 + HTML 渲染
 
 from __future__ import annotations
+
+# 必须最先导入：清代理 + patch agno httpx client
+from agno_team import _agno_setup  # noqa: F401
+
 import asyncio
 import json
 import re
@@ -20,11 +24,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-import httpx
-from openai import OpenAI
+from agno.agent import Agent
+from agno.models.openai import OpenAIChat
 
 from .report_styles import REPORT_CSS, CHART_JS_LIBS
 from .report_blocks import preprocess_custom_blocks
+
+
+# 通用 OpenAI 客户端 role_map：兼容 DeepSeek/Qwen 等不识别 "developer" 角色的 API
+_ROLE_MAP = {
+    "system": "system",
+    "user": "user",
+    "assistant": "assistant",
+    "tool": "tool",
+    "model": "assistant",
+}
 
 
 # ===== Prompts =====
@@ -486,34 +500,64 @@ class ReportAgent:
         else:
             raise ValueError("ReportAgent 需要 REPORT_ENGINE_API_KEY / FORUM_HOST_API_KEY / QUERY_ENGINE_API_KEY 至少一个")
 
-        self.client = OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=600,
-            http_client=httpx.Client(proxy=None, timeout=600),
-        )
         self.model_name = model_name
-        print(f"[ReportAgent] 使用模型: {model_name}")
+        print(f"[ReportAgent] 使用模型: {model_name}（agno 模式）")
 
-    def _llm_sync(self, system: str, user: str, temperature: float = 0.6) -> str:
-        stream = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            temperature=temperature,
-            stream=True,
+        # 创建一个共享的 OpenAIChat model（每个 agent 用独立实例避免状态污染）
+        def _make_model():
+            return OpenAIChat(
+                id=model_name,
+                api_key=api_key,
+                base_url=base_url,
+                role_map=_ROLE_MAP,
+            )
+
+        # ===== 4 个专用 agno Agent =====
+
+        # Stage 1: 大纲规划（输出 JSON）
+        self.outline_agent = Agent(
+            name="OutlineDesigner",
+            model=_make_model(),
+            instructions="你是一位资深的舆情分析报告主编，必须输出严格的 JSON 格式（不要任何 markdown 代码块包裹）。",
+            system_message_role="system",
+            markdown=False,
         )
-        chunks = []
-        for chunk in stream:
-            delta = chunk.choices[0].delta.content
-            if delta:
-                chunks.append(delta)
-        return "".join(chunks)
 
-    async def _llm(self, system: str, user: str, temperature: float = 0.6) -> str:
-        return await asyncio.to_thread(self._llm_sync, system, user, temperature)
+        # Stage 2: 章节写作（输出 Markdown + 自定义可视化标签）
+        self.chapter_agent = Agent(
+            name="ChapterWriter",
+            model=_make_model(),
+            instructions="你是一位资深的舆情分析报告主笔，擅长将多源数据融合为深度洞察，能够使用 chart-card / kpi-grid / callout 等专业可视化组件。",
+            system_message_role="system",
+            markdown=True,
+        )
+
+        # Stage 3: 跨源验证
+        self.cross_validator_agent = Agent(
+            name="CrossValidator",
+            model=_make_model(),
+            instructions="你是舆情数据交叉验证专家，擅长识别多源数据的共识与分歧。",
+            system_message_role="system",
+            markdown=True,
+        )
+
+        # Stage 4: 执行摘要
+        self.exec_summary_agent = Agent(
+            name="ExecutiveSummaryWriter",
+            model=_make_model(),
+            instructions="你是高管简报撰写专家，能用最简洁的语言传达最核心的洞察。",
+            system_message_role="system",
+            markdown=True,
+        )
+
+    async def _agent_run(self, agent: Agent, user_prompt: str) -> str:
+        """统一的 agno agent 异步调用入口，自动剥取 content"""
+        try:
+            response = await agent.arun(user_prompt)
+            return response.content if response else ""
+        except Exception as e:
+            print(f"⚠️  agno agent {agent.name} 调用失败: {e}")
+            return ""
 
     @staticmethod
     def _parse_json(text: str) -> Optional[Dict]:
@@ -538,15 +582,11 @@ class ReportAgent:
         agent_results: Dict[str, Any],
         host_speeches: List[str],
     ) -> Dict[str, Any]:
-        print("📋 [Stage 1/5] 规划报告大纲...")
+        print("📋 [Stage 1/5] 规划报告大纲（agno OutlineDesigner）...")
         input_preview = _summarize_for_outline(agent_results, host_speeches)
         prompt = OUTLINE_PROMPT.replace("{input_preview}", input_preview)
 
-        raw = await self._llm(
-            "你是一位资深的舆情分析报告主编，必须输出严格的 JSON 格式。",
-            prompt,
-            temperature=0.5,
-        )
+        raw = await self._agent_run(self.outline_agent, prompt)
 
         outline = self._parse_json(raw)
         if not outline or "chapters" not in outline:
@@ -591,11 +631,7 @@ class ReportAgent:
             host_hints=host_hints,
         )
 
-        content = await self._llm(
-            "你是一位资深的舆情分析报告主笔，擅长将多源数据融合为深度洞察。",
-            prompt,
-            temperature=0.7,
-        )
+        content = await self._agent_run(self.chapter_agent, prompt)
         print(f"   ✅ 章节「{title}」完成（{len(content)} 字）")
 
         return {**chapter, "content": content}
@@ -607,7 +643,7 @@ class ReportAgent:
         agent_results: Dict[str, Any],
         host_speeches: List[str],
     ) -> List[Dict[str, Any]]:
-        print(f"\n📝 [Stage 2/5] 并行写作 {len(outline.get('chapters', []))} 个章节...")
+        print(f"\n📝 [Stage 2/5] 并行写作 {len(outline.get('chapters', []))} 个章节（agno ChapterWriter）...")
         tasks = [
             self.write_chapter(query, ch, agent_results, host_speeches)
             for ch in outline.get("chapters", [])
@@ -620,7 +656,7 @@ class ReportAgent:
         query: str,
         agent_results: Dict[str, Any],
     ) -> str:
-        print("\n🔍 [Stage 3/5] 跨源对比验证...")
+        print("\n🔍 [Stage 3/5] 跨源对比验证（agno CrossValidator）...")
         summaries = []
         for at, result in agent_results.items():
             if not result:
@@ -634,11 +670,7 @@ class ReportAgent:
             query=query,
             agent_summaries=agent_summaries_text,
         )
-        result = await self._llm(
-            "你是舆情数据交叉验证专家，擅长识别多源数据的共识与分歧。",
-            prompt,
-            temperature=0.5,
-        )
+        result = await self._agent_run(self.cross_validator_agent, prompt)
         print(f"   ✅ 跨源验证完成（{len(result)} 字）")
         return result
 
@@ -650,7 +682,7 @@ class ReportAgent:
         chapters: List[Dict[str, Any]],
         cross_validation: str,
     ) -> str:
-        print("\n📊 [Stage 4/5] 撰写执行摘要...")
+        print("\n📊 [Stage 4/5] 撰写执行摘要（agno ExecutiveSummaryWriter）...")
         chapters_preview = "\n\n".join(
             f"### {ch['title']}\n{ch.get('content', '')[:1000]}..." for ch in chapters
         )
@@ -661,11 +693,7 @@ class ReportAgent:
             chapters_preview=chapters_preview[:6000],
             cross_validation_summary=cross_validation[:2000],
         )
-        result = await self._llm(
-            "你是高管简报撰写专家，能用最简洁的语言传达最核心的洞察。",
-            prompt,
-            temperature=0.5,
-        )
+        result = await self._agent_run(self.exec_summary_agent, prompt)
         print(f"   ✅ 执行摘要完成（{len(result)} 字）")
         return result
 
@@ -698,14 +726,27 @@ class ReportAgent:
         parts.append("<!-- TOC -->")
         parts.append("")
 
-        # 章节正文
+        # 章节正文：统一前置一个 # 标题，便于 HTML 渲染时自动编号"第X章"
         for ch in chapters:
-            content = ch.get("content", "")
-            if not content.strip().startswith("#"):
-                content = f"# {ch['title']}\n\n{content}"
-            elif content.strip().startswith("##") and not content.strip().startswith("###"):
-                # 章节用了 ## 开头，提升为 #
-                content = "#" + content
+            content = ch.get("content", "").strip()
+            chapter_title = ch.get("title", "").strip()
+
+            # 策略：无论 LLM 是否在内部用了 #/##/### 标题，
+            # 都强制在最前面加一个 # 章节标题，作为 H1。
+            # 同时把 LLM 内部所有的标题级别下推一级（# → ##, ## → ###, ...）
+            # 这样章节标题永远是 H1，内部分节是 H2/H3/H4。
+            if content:
+                # 下推所有 markdown 标题级别一级（最多到 H6）
+                def _shift_heading(m):
+                    hashes = m.group(1)
+                    text = m.group(2)
+                    new_level = min(len(hashes) + 1, 6)
+                    return "#" * new_level + " " + text
+
+                content = re.sub(r"^(#{1,5})\s+(.+)$", _shift_heading, content, flags=re.MULTILINE)
+
+            parts.append(f"# {chapter_title}")
+            parts.append("")
             parts.append(content)
             parts.append("")
 

@@ -2,31 +2,53 @@
 # 单个 Agent 的多步流程编排（async 版本）
 # 提取自 run_single_agent.py，加入 ForumState 集成
 #
-# 关键变化：
-# 1. 所有 LLM/工具调用通过 asyncio.to_thread 包装，避免阻塞 event loop
-# 2. 每个段落的 SummaryNode 步骤之前会读取 ForumState 的最新 HOST 发言
-# 3. 段落产出后会写入 ForumState（触发 Host 阈值检查）
+# Stage 3 改造：所有 LLM 调用改用 agno Agent（之前是裸 OpenAI SDK）
+# - 每个 (engine_type, stage) 组合用一个独立的 agno Agent 实例
+# - Agent 的 instructions 在每次调用前动态设置，避免预创建 30+ 个 Agent
+# - 工具调用仍然走我们手写的 dispatch（保持段落级流程的精细控制）
 
 from __future__ import annotations
+
+# 必须最先导入：清代理 + patch agno httpx client
+from . import _agno_setup  # noqa: F401
+
 import asyncio
 import json
 import re
 from typing import List, Dict, Any, Optional
 
-from openai import OpenAI
+from agno.agent import Agent
+from agno.models.openai import OpenAIChat
 
 from .forum_state import ForumState, format_host_speech_for_prompt
 
 
-# ===== LLM 客户端缓存 =====
+_ROLE_MAP = {
+    "system": "system",
+    "user": "user",
+    "assistant": "assistant",
+    "tool": "tool",
+    "model": "assistant",
+}
 
-_clients_cache: Dict[str, tuple] = {}
+
+# ===== agno Agent 缓存 =====
+# 按 engine_type 缓存一个"通用"的 agno Agent，每次调用时通过 message 传 system/user
+
+_agents_cache: Dict[str, Agent] = {}
 
 
-def _get_client(config_prefix: str):
-    """获取或创建 OpenAI client + model_name（按 engine 缓存）"""
-    if config_prefix in _clients_cache:
-        return _clients_cache[config_prefix]
+def _get_agno_agent(config_prefix: str) -> Agent:
+    """
+    获取或创建一个 engine 对应的 agno Agent。
+
+    设计取舍：
+    - 不为每个 stage 单独创建 agent（避免 30+ 个 agent 实例）
+    - 让 agent 的 instructions 保持空，每次调用都把 system_prompt 拼到 user message 前面
+    - 这相当于把 agno 当成一个"带代理 patch 的 OpenAI SDK 包装器"使用
+    """
+    if config_prefix in _agents_cache:
+        return _agents_cache[config_prefix]
 
     from config import settings
     api_key = getattr(settings, f"{config_prefix}_API_KEY")
@@ -36,33 +58,69 @@ def _get_client(config_prefix: str):
     if not api_key:
         raise ValueError(f"{config_prefix}_API_KEY 未配置")
 
-    client = OpenAI(api_key=api_key, base_url=base_url, timeout=600)
-    _clients_cache[config_prefix] = (client, model_name)
-    return client, model_name
-
-
-def _call_llm_sync(client, model_name: str, system_prompt: str, user_content: str) -> str:
-    """同步 LLM 调用（内部使用，外部用 _call_llm 异步包装）"""
-    stream = client.chat.completions.create(
-        model=model_name,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-        temperature=0.7,
-        stream=True,
+    agent = Agent(
+        name=f"{config_prefix}_Worker",
+        model=OpenAIChat(
+            id=model_name,
+            api_key=api_key,
+            base_url=base_url,
+            role_map=_ROLE_MAP,
+        ),
+        # 不设 instructions，每次调用通过 user prompt 携带 system_prompt
+        # 这样可以让一个 agent 实例服务于 6 个不同 stage 的 prompt
+        system_message_role="system",
+        markdown=True,
     )
-    chunks = []
-    for chunk in stream:
-        delta = chunk.choices[0].delta.content
-        if delta:
-            chunks.append(delta)
-    return "".join(chunks)
+    _agents_cache[config_prefix] = agent
+    return agent
 
 
-async def _call_llm(client, model_name: str, system_prompt: str, user_content: str) -> str:
-    """异步 LLM 调用，自动卸到线程池"""
-    return await asyncio.to_thread(_call_llm_sync, client, model_name, system_prompt, user_content)
+async def _call_llm(client_or_agent, model_name_or_unused, system_prompt: str, user_content: str) -> str:
+    """
+    调用 LLM 的统一入口（agno 模式）。
+
+    保持与旧版相同的签名，便于其他代码不改动。
+    第一/二个参数实际上不再使用（保留是为了兼容性），真正的 agent 通过
+    config_prefix → _get_agno_agent 动态获取。
+
+    Stage 3 改造：传入的 client/model 参数被忽略，改用全局 agno Agent 缓存。
+    """
+    # 如果第一个参数已经是 agno Agent（兼容直接传入的情况）
+    if isinstance(client_or_agent, Agent):
+        agent = client_or_agent
+    else:
+        # 兼容老调用方式：第一个参数曾经是 OpenAI client，现在用全局 fallback
+        # （实际上 Stage 3 之后会通过 config_prefix 直接拿）
+        raise ValueError("agent_runner Stage 3 改造后，请通过 _call_llm_via_engine 调用")
+
+    # agno Agent 的 instructions 是在 init 时设置的；这里我们用 prepend 方式
+    # 把 system_prompt 拼到 user message 前面，让 agent 临时拥有这个角色
+    full_message = f"<system>\n{system_prompt}\n</system>\n\n{user_content}"
+    response = await agent.arun(full_message)
+    return response.content if response else ""
+
+
+async def _call_llm_via_engine(config_prefix: str, system_prompt: str, user_content: str) -> str:
+    """
+    Stage 3 推荐入口：根据 engine_type 拿对应的 agno Agent，调用一次。
+    """
+    agent = _get_agno_agent(config_prefix)
+    full_message = f"<system>\n{system_prompt}\n</system>\n\n{user_content}"
+    try:
+        response = await agent.arun(full_message)
+        return response.content if response else ""
+    except Exception as e:
+        print(f"⚠️  agno agent 调用失败 ({config_prefix}): {e}")
+        return ""
+
+
+# 兼容旧的 _get_client / _call_llm_sync API（其他文件可能还在用）
+
+def _get_client(config_prefix: str):
+    """兼容旧 API：返回 (agent, model_name) 元组"""
+    agent = _get_agno_agent(config_prefix)
+    from config import settings
+    return agent, getattr(settings, f"{config_prefix}_MODEL_NAME")
 
 
 def _parse_json(text: str) -> Optional[Any]:
@@ -200,7 +258,9 @@ async def run_agent_pipeline(
         raise ValueError(f"未知 agent_type: {agent_type}")
 
     agent_name, config_prefix, forum_role = AGENT_CONFIG[agent_type]
-    client, model_name = _get_client(config_prefix)
+    # Stage 3 改造：不再创建 OpenAI client，所有 LLM 调用通过 _call_llm_via_engine 走 agno
+    # 仍然预热一次 agent 实例（缓存命中后续都很快）
+    _get_agno_agent(config_prefix)
 
     # 检测可用的海外工具（仅 insight 需要）
     overseas_extra = ""
@@ -242,7 +302,7 @@ async def run_agent_pipeline(
     print(f"\n🚀 [{agent_name}] 启动，主题: {query}")
 
     # ===== 阶段一：规划报告结构 =====
-    structure_raw = await _call_llm(client, model_name, SYSTEM_PROMPT_REPORT_STRUCTURE, query)
+    structure_raw = await _call_llm_via_engine(config_prefix, SYSTEM_PROMPT_REPORT_STRUCTURE, query)
     paragraphs_outline = _parse_json(structure_raw)
     if not isinstance(paragraphs_outline, list):
         paragraphs_outline = []
@@ -263,7 +323,7 @@ async def run_agent_pipeline(
 
         # 2a. 首次搜索决策（insight 类型在 system prompt 末尾追加海外平台说明）
         search_system = SYSTEM_PROMPT_FIRST_SEARCH + (overseas_extra if overseas_extra else "")
-        search_decision_raw = await _call_llm(client, model_name, search_system, para_input)
+        search_decision_raw = await _call_llm_via_engine(config_prefix, search_system, para_input)
         decision = _parse_json(search_decision_raw)
 
         # 2b. 调用真实工具
@@ -285,7 +345,7 @@ async def run_agent_pipeline(
             "search_results": [search_results],
         }, ensure_ascii=False)
 
-        summary_raw = await _call_llm(client, model_name, SYSTEM_PROMPT_FIRST_SUMMARY, summary_input)
+        summary_raw = await _call_llm_via_engine(config_prefix, SYSTEM_PROMPT_FIRST_SUMMARY, summary_input)
         summary_data = _parse_json(summary_raw)
         paragraph_state = (
             summary_data.get("paragraph_latest_state", summary_raw)
@@ -305,7 +365,7 @@ async def run_agent_pipeline(
         }, ensure_ascii=False)
 
         reflection_system = SYSTEM_PROMPT_REFLECTION + (overseas_extra if overseas_extra else "")
-        reflection_raw = await _call_llm(client, model_name, reflection_system, reflection_input)
+        reflection_raw = await _call_llm_via_engine(config_prefix, reflection_system, reflection_input)
         ref_decision = _parse_json(reflection_raw)
 
         ref_search_results = f"（无补充搜索结果：{title}）"
@@ -327,7 +387,7 @@ async def run_agent_pipeline(
             "paragraph_latest_state": paragraph_state,
         }, ensure_ascii=False)
 
-        ref_summary_raw = await _call_llm(client, model_name, SYSTEM_PROMPT_REFLECTION_SUMMARY, ref_summary_input)
+        ref_summary_raw = await _call_llm_via_engine(config_prefix, SYSTEM_PROMPT_REFLECTION_SUMMARY, ref_summary_input)
         ref_summary_data = _parse_json(ref_summary_raw)
         final_state = (
             ref_summary_data.get("updated_paragraph_latest_state", paragraph_state)
@@ -347,7 +407,7 @@ async def run_agent_pipeline(
     # ===== 阶段三：最终报告格式化 =====
     print(f"📝 [{agent_name}] 生成最终报告...")
     formatting_input = json.dumps(paragraph_results, ensure_ascii=False)
-    final_report = await _call_llm(client, model_name, SYSTEM_PROMPT_REPORT_FORMATTING, formatting_input)
+    final_report = await _call_llm_via_engine(config_prefix, SYSTEM_PROMPT_REPORT_FORMATTING, formatting_input)
 
     print(f"✅ [{agent_name}] 完成（{len(final_report)} 字）")
 
