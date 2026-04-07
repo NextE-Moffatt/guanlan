@@ -1,12 +1,16 @@
 # agno_team/forum_host.py
 # 论坛主持人 LLM 调用器
 # 迁移自 BettaFish/ForumEngine/llm_host.py
+#
+# Stage 1: 改用 agno Agent 实现（之前是裸 OpenAI SDK）
 
-import asyncio
+from . import _agno_setup  # noqa: F401  必须最先导入！
+
 from datetime import datetime
 from typing import List, Optional
 
-from openai import OpenAI
+from agno.agent import Agent
+from agno.models.openai import OpenAIChat
 
 from .forum_state import ForumEntry
 
@@ -87,7 +91,11 @@ def _build_user_prompt(recent_speeches: List[ForumEntry]) -> str:
 
 
 class ForumHost:
-    """论坛主持人，使用单独的 LLM 配置（默认 qwen-plus / FORUM_HOST_*）"""
+    """
+    论坛主持人，使用单独的 LLM 配置（默认 qwen-plus / FORUM_HOST_*）
+
+    实现：agno Agent（无工具，纯文本生成）
+    """
 
     def __init__(self, config=None):
         if config is None:
@@ -95,7 +103,6 @@ class ForumHost:
             config = settings
 
         # 关键：必须三个字段一致回退（key/base_url/model 是一组）
-        # 否则会出现 DeepSeek 的 key 配 qwen-plus 的 model 这种荒谬组合
         if config.FORUM_HOST_API_KEY:
             api_key = config.FORUM_HOST_API_KEY
             base_url = config.FORUM_HOST_BASE_URL
@@ -111,30 +118,36 @@ class ForumHost:
                 "或确保 QUERY_ENGINE_API_KEY 可用作回退"
             )
 
-        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=300)
         self.model_name = model_name
+        self.agent = Agent(
+            name="ForumHost",
+            model=OpenAIChat(
+                id=model_name,
+                api_key=api_key,
+                base_url=base_url,
+                role_map={
+                    "system": "system",
+                    "user": "user",
+                    "assistant": "assistant",
+                    "tool": "tool",
+                    "model": "assistant",
+                },
+            ),
+            instructions=HOST_SYSTEM_PROMPT,
+            system_message_role="system",
+            markdown=True,
+        )
 
-    def _generate_sync(self, recent_speeches: List[ForumEntry]) -> Optional[str]:
-        """同步调用 LLM，返回主持人发言"""
+    async def generate(self, recent_speeches: List[ForumEntry]) -> Optional[str]:
+        """异步生成主持人发言（agno 原生异步入口）"""
         if not recent_speeches:
             return None
 
+        user_prompt = _build_user_prompt(recent_speeches)
         try:
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": HOST_SYSTEM_PROMPT},
-                    {"role": "user", "content": _build_user_prompt(recent_speeches)},
-                ],
-                temperature=0.6,
-                top_p=0.9,
-            )
-            content = response.choices[0].message.content
+            response = await self.agent.arun(user_prompt)
+            content = response.content if response else None
             return content.strip() if content else None
         except Exception as e:
-            print(f"⚠️  ForumHost 调用失败: {e}")
+            print(f"⚠️  ForumHost (agno) 调用失败: {e}")
             return None
-
-    async def generate(self, recent_speeches: List[ForumEntry]) -> Optional[str]:
-        """异步入口（包装同步调用，避免阻塞 event loop）"""
-        return await asyncio.to_thread(self._generate_sync, recent_speeches)
