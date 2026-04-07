@@ -1,70 +1,108 @@
 # agno_team/opinion_team.py
-# TODO(C组): 用 agno Team 编排所有 Agent
-# 替代原 app.py 中的多引擎调度逻辑
+# 舆情分析主调度器（路径3：asyncio + 内存共享 forum_state）
+#
+# 工作流程：
+# 1. 创建 ForumState（共享论坛状态 + Host 触发回调）
+# 2. asyncio.gather 三个 agent 并发执行
+# 3. 每个 agent 在生成段落总结时：
+#    - 读取 ForumState 中最新的 HOST 发言并塞进 prompt
+#    - 写入段落产出，自动触发 Host 阈值检查
+# 4. 三 agent 全部完成后，调用 ReportAgent 综合三份报告 + 论坛日志
 
-from agno.team import Team
-from agno.models.openai import OpenAIChat
+from __future__ import annotations
+import asyncio
+from typing import Dict, Any, List, Optional
+
+from .forum_state import ForumState
+from .forum_host import ForumHost
+from .agent_runner import run_agent_pipeline
 
 
-def create_opinion_team(config=None):
+async def run_opinion_pipeline(
+    query: str,
+    host_threshold: int = 5,
+    config=None,
+) -> Dict[str, Any]:
     """
-    创建舆情分析 Team，编排所有 Agent 的协作流程。
-    替代原 app.py 的引擎调度逻辑。
-
-    工作流程：
-    1. 协调者收到分析主题
-    2. 并行触发 InsightAgent、MediaAgent、QueryAgent
-    3. 三个分析完成后，交给 ReportAgent 生成综合报告
-    4. 返回最终报告路径
+    异步运行完整的舆情分析流程：三 agent 并发 + ForumHost 引导 + 最终汇总。
 
     Args:
-        config: Settings 对象，为 None 时从全局 settings 读取
-    """
-    if config is None:
-        from config import settings
-        config = settings
+        query: 分析主题
+        host_threshold: 累计多少条 agent 段落总结触发一次 Host 引导，默认 5
+        config: Settings 对象
 
-    # TODO(C组): B组完成后取消注释并引入真实 Agent
-    # from agno_agents import create_insight_agent, create_media_agent, create_query_agent
-    # from agno_agents.report_agent import create_report_agent
-    # insight_agent = create_insight_agent(config)
-    # media_agent = create_media_agent(config)
-    # query_agent = create_query_agent(config)
-    # report_agent = create_report_agent(config)
-
-    team = Team(
-        name="微舆舆情分析团队",
-        mode="coordinate",
-        model=OpenAIChat(
-            id=config.INSIGHT_ENGINE_MODEL_NAME,
-            api_key=config.INSIGHT_ENGINE_API_KEY,
-            base_url=config.INSIGHT_ENGINE_BASE_URL,
-        ),
-        members=[],  # TODO(C组): 填入上方四个 agent
-        instructions="""
-你是舆情分析团队的协调者。收到分析主题后：
-1. 同时向 InsightAgent、MediaAgent、QueryAgent 发布分析任务
-2. 等待三个 Agent 完成各自的分析
-3. 将三份分析报告汇总后，交给 ReportAgent 生成综合 HTML 报告
-4. 返回最终报告的文件路径给用户
-""",
-        markdown=True,
-        stream=True,
-        show_tool_calls=True,
-    )
-    return team
-
-
-def run_opinion_analysis(topic: str, config=None) -> str:
-    """
-    执行完整舆情分析流程。
-    替代原 app.py 的任务调度入口。
-
-    Args:
-        topic: 分析主题，如 "某品牌产品质量危机"
     Returns:
-        综合报告 HTML 文件路径，或最终报告内容
+        dict: {
+            "query": str,
+            "agent_results": {
+                "insight": {agent_results dict},
+                "media":   {agent_results dict},
+                "query":   {agent_results dict},
+            },
+            "forum_log": str (完整论坛日志的人类可读格式),
+            "host_speeches": List[str] (所有 HOST 引导发言),
+        }
     """
-    team = create_opinion_team(config)
-    response = team.run(f"请对以下主题进行全面的舆情分析：{topic}")
-    return response.content
+    # 初始化 ForumHost
+    host = ForumHost(config=config)
+
+    # 创建 ForumState，绑定 host 回调
+    forum_state = ForumState(
+        host_threshold=host_threshold,
+        host_callback=host.generate,
+    )
+
+    print(f"\n{'=' * 60}")
+    print(f"  舆情分析任务启动")
+    print(f"  主题: {query}")
+    print(f"  Host 引导阈值: {host_threshold} 条")
+    print(f"{'=' * 60}\n")
+
+    # ⭐ 三 agent 并发执行
+    insight_task = asyncio.create_task(
+        run_agent_pipeline("insight", query, forum_state),
+        name="InsightAgent",
+    )
+    media_task = asyncio.create_task(
+        run_agent_pipeline("media", query, forum_state),
+        name="MediaAgent",
+    )
+    query_task = asyncio.create_task(
+        run_agent_pipeline("query", query, forum_state),
+        name="QueryAgent",
+    )
+
+    # gather 等待全部完成
+    results = await asyncio.gather(
+        insight_task, media_task, query_task,
+        return_exceptions=True,
+    )
+
+    # 处理可能的异常
+    agent_results = {}
+    for r in results:
+        if isinstance(r, Exception):
+            print(f"⚠️  Agent 执行失败: {type(r).__name__}: {r}")
+            continue
+        agent_results[r["agent_type"]] = r
+
+    print(f"\n{'=' * 60}")
+    print(f"  全部 Agent 执行完毕")
+    print(f"  论坛总条数: {len(forum_state.entries)}")
+    print(f"  Host 引导次数: {len(forum_state.get_all_host_speeches())}")
+    print(f"{'=' * 60}\n")
+
+    return {
+        "query": query,
+        "agent_results": agent_results,
+        "forum_log": forum_state.format_full_log(),
+        "host_speeches": [e.content for e in forum_state.get_all_host_speeches()],
+        "_forum_state": forum_state,  # 供 ReportAgent 进一步使用
+    }
+
+
+def run_opinion_analysis(query: str, host_threshold: int = 5, config=None) -> Dict[str, Any]:
+    """
+    同步入口：包装 run_opinion_pipeline，便于命令行/Flask 调用。
+    """
+    return asyncio.run(run_opinion_pipeline(query, host_threshold=host_threshold, config=config))

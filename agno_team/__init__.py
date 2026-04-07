@@ -1,6 +1,17 @@
 # agno_team/__init__.py
-# 编排层：将所有 Agent 组装为 Team，由 C 组负责实现
+# 编排层：三 agent 并发协作 + ForumHost 引导
 
-# from .opinion_team import create_opinion_team, run_opinion_analysis
+from .forum_state import ForumState, ForumEntry, format_host_speech_for_prompt
+from .forum_host import ForumHost
+from .agent_runner import run_agent_pipeline
+from .opinion_team import run_opinion_pipeline, run_opinion_analysis
 
-# TODO(C组): 完成实现后取消注释上方导出
+__all__ = [
+    "ForumState",
+    "ForumEntry",
+    "format_host_speech_for_prompt",
+    "ForumHost",
+    "run_agent_pipeline",
+    "run_opinion_pipeline",
+    "run_opinion_analysis",
+]

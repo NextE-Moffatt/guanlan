@@ -14,9 +14,9 @@ BettaFish 有三个核心分析引擎，每个引擎手写了一套 `nodes/` + `
 
 | 原引擎 | 功能 | 对应 LLM |
 |---|---|---|
-| `InsightEngine` | 深度搜索分析（含反思循环）| kimi-k2 |
-| `MediaEngine` | 媒体内容分析 | gemini-2.5-pro |
-| `QueryEngine` | 舆情数据查询 | deepseek-chat |
+| `InsightEngine` | 社交媒体舆情分析（本地数据库，含反思循环）| kimi-k2 |
+| `MediaEngine` | 多模态网页内容分析（综合搜索/图片/结构化数据）| gemini-2.5-pro |
+| `QueryEngine` | 新闻深度分析（多源核实/事实核查）| deepseek-chat |
 
 ---
 

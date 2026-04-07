@@ -19,12 +19,12 @@ class Settings(BaseSettings):
     PORT: int = Field(5000)
 
     DB_DIALECT: str = Field("postgresql")
-    DB_HOST: str = Field("your_db_host")
-    DB_PORT: int = Field(3306)
-    DB_USER: str = Field("your_db_user")
-    DB_PASSWORD: str = Field("your_db_password")
+    DB_HOST: Optional[str] = Field("your_db_host")
+    DB_PORT: Optional[int] = Field(3306)
+    DB_USER: Optional[str] = Field("your_db_user")
+    DB_PASSWORD: Optional[str] = Field("your_db_password")
     DB_NAME: str = Field("your_db_name")
-    DB_CHARSET: str = Field("utf8mb4")
+    DB_CHARSET: Optional[str] = Field("utf8mb4")
 
     INSIGHT_ENGINE_API_KEY: Optional[str] = Field(None)
     INSIGHT_ENGINE_BASE_URL: Optional[str] = Field("https://api.moonshot.cn/v1")
@@ -56,6 +56,13 @@ class Settings(BaseSettings):
     BOCHA_WEB_SEARCH_API_KEY: Optional[str] = Field(None)
     BOCHA_BASE_URL: str = Field("https://api.bocha.cn/v1/ai-search")
     SEARCH_TOOL_TYPE: str = Field("AnspireAPI")
+
+    # ============ 海外数据源 ============
+    YOUTUBE_API_KEY: Optional[str] = Field(None, description="YouTube Data API v3 key")
+    REDDIT_CLIENT_ID: Optional[str] = Field(None, description="Reddit OAuth Client ID")
+    REDDIT_CLIENT_SECRET: Optional[str] = Field(None, description="Reddit OAuth Client Secret")
+    REDDIT_USER_AGENT: str = Field("agno-mirofish/0.1", description="Reddit User-Agent 字符串")
+    GITHUB_TOKEN: Optional[str] = Field(None, description="GitHub Personal Access Token (可选，提升限速)")
 
 
 settings = Settings()
