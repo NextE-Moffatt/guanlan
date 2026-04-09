@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>观澜 · 多智能体舆情分析系统</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+            background: linear-gradient(135deg, #f0f4ff 0%, #faf5ff 100%);
+            min-height: 100vh;
+        }
+
+        .brand-gradient {
+            background: linear-gradient(135deg, #1e3a8a 0%, #7c3aed 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .agent-card {
+            transition: all 0.3s ease;
+        }
+
+        .agent-card.active {
+            border-color: #3b82f6;
+            box-shadow: 0 4px 20px rgba(59, 130, 246, 0.15);
+        }
+
+        .agent-card.done {
+            border-color: #10b981;
+            background: linear-gradient(to bottom, #f0fdf4, white);
+        }
+
+        .feed-item {
+            animation: slideIn 0.4s ease-out;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .role-badge {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        }
+
+        .role-INSIGHT { background: #dbeafe; color: #1e40af; }
+        .role-MEDIA { background: #fce7f3; color: #9f1239; }
+        .role-QUERY { background: #d1fae5; color: #065f46; }
+        .role-HOST { background: #fef3c7; color: #92400e; }
+        .role-SYSTEM { background: #f3f4f6; color: #4b5563; }
+
+        /* 自定义滚动条 */
+        .feed-container::-webkit-scrollbar {
+            width: 8px;
+        }
+        .feed-container::-webkit-scrollbar-track {
+            background: #f1f5f9;
+            border-radius: 4px;
+        }
+        .feed-container::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 4px;
+        }
+        .feed-container::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+
+        .pulse-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #10b981;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(1.2); }
+        }
+
+        .stage-badge {
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .stage-idle { background: #f3f4f6; color: #6b7280; }
+        .stage-analyzing { background: #dbeafe; color: #1e40af; }
+        .stage-reporting { background: #fef3c7; color: #92400e; }
+        .stage-completed { background: #d1fae5; color: #065f46; }
+        .stage-failed { background: #fee2e2; color: #991b1b; }
+
+        .content-preview {
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .content-preview.expanded {
+            -webkit-line-clamp: unset;
+        }
+    </style>
+</head>
+<body>
+
+<div class="max-w-7xl mx-auto px-6 py-8">
+
+    <!-- 顶部：Header + 表单 -->
+    <header class="mb-8">
+        <div class="flex items-center justify-between mb-2">
+            <h1 class="text-3xl font-bold brand-gradient">🌊 观澜</h1>
+            <div class="flex items-center gap-2 text-sm text-slate-500">
+                <span id="conn-dot" class="pulse-dot" style="background:#94a3b8"></span>
+                <span id="conn-status">未连接</span>
+            </div>
+        </div>
+        <p class="text-slate-600 mb-1">多智能体舆情分析系统 · 三路并发 · 主持人段落级引导 · 自动综合成稿</p>
+        <p class="text-xs text-slate-400 italic mb-6">"观水有术，必观其澜" ——《庄子·秋水》</p>
+
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+            <div class="flex gap-4 items-end">
+                <div class="flex-1">
+                    <label class="block text-sm font-semibold text-slate-700 mb-2">分析主题</label>
+                    <input
+                        id="query-input"
+                        type="text"
+                        placeholder="例如：Claude Code 在中文程序员社区的舆情分析"
+                        class="w-full px-4 py-3 border-2 border-slate-200 rounded-xl focus:outline-none focus:border-blue-500 text-slate-800 placeholder-slate-400"
+                        value="Claude Code 在中文程序员社区的舆情分析"
+                    />
+                </div>
+                <div class="w-40">
+                    <label class="block text-sm font-semibold text-slate-700 mb-2">主持人阈值</label>
+                    <input
+                        id="threshold-input"
+                        type="number"
+                        min="2" max="10"
+                        value="5"
+                        class="w-full px-4 py-3 border-2 border-slate-200 rounded-xl focus:outline-none focus:border-blue-500 text-slate-800"
+                    />
+                </div>
+                <button
+                    id="start-btn"
+                    class="px-8 py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white font-semibold rounded-xl hover:from-blue-700 hover:to-purple-700 transition-all shadow-sm hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                    🚀 开始观澜
+                </button>
+            </div>
+
+            <div class="mt-4 flex items-center gap-4 text-sm text-slate-500">
+                <span>状态：</span>
+                <span id="stage-badge" class="stage-badge stage-idle">空闲</span>
+                <span id="elapsed-time"></span>
+            </div>
+        </div>
+    </header>
+
+    <!-- 主体：三智能体进度卡片 -->
+    <section class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+        <div class="agent-card bg-white rounded-xl shadow-sm border-2 border-slate-200 p-5" data-agent="insight">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="font-bold text-slate-800">📊 舆情探察</h3>
+                <span class="agent-status text-xs text-slate-400">待命</span>
+            </div>
+            <p class="text-xs text-slate-500 mb-3">社交媒体深度挖掘 · 微博 / B站 / 知乎 / 贴吧 / 国际论坛</p>
+            <div class="text-2xl font-bold text-blue-600 agent-count">0</div>
+            <div class="text-xs text-slate-400">段落产出</div>
+        </div>
+
+        <div class="agent-card bg-white rounded-xl shadow-sm border-2 border-slate-200 p-5" data-agent="media">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="font-bold text-slate-800">🎨 多模态分析</h3>
+                <span class="agent-status text-xs text-slate-400">待命</span>
+            </div>
+            <p class="text-xs text-slate-500 mb-3">网页综合检索 · 图片视觉 · 结构化数据卡</p>
+            <div class="text-2xl font-bold text-pink-600 agent-count">0</div>
+            <div class="text-xs text-slate-400">段落产出</div>
+        </div>
+
+        <div class="agent-card bg-white rounded-xl shadow-sm border-2 border-slate-200 p-5" data-agent="query">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="font-bold text-slate-800">📰 新闻调查</h3>
+                <span class="agent-status text-xs text-slate-400">待命</span>
+            </div>
+            <p class="text-xs text-slate-500 mb-3">新闻深度调查 · 多源事实核查 · 时间线还原</p>
+            <div class="text-2xl font-bold text-green-600 agent-count">0</div>
+            <div class="text-xs text-slate-400">段落产出</div>
+        </div>
+    </section>
+
+    <!-- 论坛实时流 -->
+    <section class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+
+        <!-- 左侧：实时发言流 -->
+        <div class="lg:col-span-2 bg-white rounded-2xl shadow-sm border border-slate-200">
+            <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+                <h2 class="font-bold text-slate-800">💬 实时议事厅</h2>
+                <span id="feed-count" class="text-xs text-slate-500">0 条</span>
+            </div>
+            <div id="feed-container" class="feed-container p-6 space-y-4 overflow-y-auto" style="max-height:600px">
+                <div class="text-center text-slate-400 py-12">
+                    <div class="text-5xl mb-3">📋</div>
+                    <p>任务启动后，三位智能体的段落产出会实时汇聚在此</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 右侧：主持人发言 -->
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-200">
+            <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+                <h2 class="font-bold text-slate-800">🎤 主持人引导</h2>
+                <span id="host-count" class="text-xs text-slate-500">0 次</span>
+            </div>
+            <div id="host-container" class="feed-container p-6 space-y-4 overflow-y-auto" style="max-height:600px">
+                <div class="text-center text-slate-400 py-12">
+                    <div class="text-4xl mb-3">🎤</div>
+                    <p class="text-sm">每累计 <span id="threshold-display">5</span> 条段落<br/>主持人会综合发言并反向引导下一轮分析</p>
+                </div>
+            </div>
+        </div>
+
+    </section>
+
+    <!-- 报告结果区（任务完成后显示） -->
+    <section id="report-section" class="bg-white rounded-2xl shadow-sm border border-slate-200 mb-6 hidden">
+        <div class="px-6 py-4 border-b border-slate-100">
+            <h2 class="font-bold text-slate-800">📕 综合分析报告</h2>
+        </div>
+        <div class="p-6">
+            <div id="report-summary" class="mb-4"></div>
+            <div class="flex gap-3 flex-wrap">
+                <a id="view-report-btn" href="#" target="_blank"
+                   class="px-5 py-2.5 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-all">
+                    👁 新标签页查看报告
+                </a>
+                <a id="download-md-btn" href="#" download
+                   class="px-5 py-2.5 bg-slate-200 text-slate-700 font-semibold rounded-lg hover:bg-slate-300 transition-all">
+                    ⬇️ 下载源文稿
+                </a>
+                <button id="show-iframe-btn"
+                        class="px-5 py-2.5 bg-purple-600 text-white font-semibold rounded-lg hover:bg-purple-700 transition-all">
+                    📑 页面内预览
+                </button>
+            </div>
+            <div id="report-iframe-wrap" class="mt-4 hidden">
+                <iframe id="report-iframe" class="w-full border border-slate-200 rounded-lg" style="height:800px"></iframe>
+            </div>
+        </div>
+    </section>
+
+    <footer class="text-center text-xs text-slate-400 py-6">
+        观澜 · 多智能体舆情分析系统
+    </footer>
+
+</div>
+
+<script>
+/* ==================== 状态管理 ==================== */
+const STAGE_TEXT = {
+    idle: "空闲",
+    analyzing: "三路并发分析中",
+    reporting: "综合成稿中",
+    completed: "已完成",
+    failed: "失败",
+};
+
+let startTime = null;
+let timerInterval = null;
+
+/* ==================== Socket.IO ==================== */
+const socket = io();
+
+socket.on("connect", () => {
+    document.getElementById("conn-dot").style.background = "#10b981";
+    document.getElementById("conn-status").textContent = "已连接";
+});
+
+socket.on("disconnect", () => {
+    document.getElementById("conn-dot").style.background = "#ef4444";
+    document.getElementById("conn-status").textContent = "断开";
+});
+
+socket.on("task_state", (state) => {
+    // 连接时的状态同步
+    if (state.running) {
+        updateStage(state.stage);
+        if (state.entries && state.entries.length) {
+            state.entries.forEach(e => renderEntry(e, false));
+        }
+        if (state.agent_progress) {
+            Object.entries(state.agent_progress).forEach(([k, v]) => updateAgentCard(k, v));
+        }
+    }
+});
+
+socket.on("task_started", (data) => {
+    clearFeeds();
+    updateStage("analyzing");
+    startTimer();
+});
+
+socket.on("stage_update", (data) => {
+    updateStage(data.stage);
+});
+
+socket.on("forum_entry", (entry) => {
+    renderEntry(entry, true);
+});
+
+socket.on("agent_progress", (data) => {
+    updateAgentCard(data.agent, data.progress);
+});
+
+socket.on("task_completed", (data) => {
+    updateStage("completed");
+    stopTimer();
+    showReport(data);
+    document.getElementById("start-btn").disabled = false;
+});
+
+socket.on("task_failed", (data) => {
+    updateStage("failed");
+    stopTimer();
+    alert("任务失败：" + data.error);
+    document.getElementById("start-btn").disabled = false;
+});
+
+/* ==================== UI 操作 ==================== */
+document.getElementById("start-btn").addEventListener("click", async () => {
+    const query = document.getElementById("query-input").value.trim();
+    const threshold = parseInt(document.getElementById("threshold-input").value, 10) || 5;
+
+    if (!query) {
+        alert("请输入分析主题");
+        return;
+    }
+
+    document.getElementById("start-btn").disabled = true;
+    document.getElementById("threshold-display").textContent = threshold;
+    document.getElementById("report-section").classList.add("hidden");
+
+    try {
+        const resp = await fetch("/api/start", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({query, threshold}),
+        });
+        const data = await resp.json();
+        if (!data.ok) {
+            alert("启动失败：" + data.error);
+            document.getElementById("start-btn").disabled = false;
+        }
+    } catch (e) {
+        alert("网络错误：" + e.message);
+        document.getElementById("start-btn").disabled = false;
+    }
+});
+
+function clearFeeds() {
+    document.getElementById("feed-container").innerHTML = "";
+    document.getElementById("host-container").innerHTML = "";
+    document.getElementById("feed-count").textContent = "0 条";
+    document.getElementById("host-count").textContent = "0 次";
+    ["insight", "media", "query"].forEach(a => {
+        const card = document.querySelector(`[data-agent="${a}"]`);
+        card.classList.remove("active", "done");
+        card.querySelector(".agent-count").textContent = "0";
+        card.querySelector(".agent-status").textContent = "待命";
+    });
+}
+
+function renderEntry(entry, animate) {
+    const isHost = entry.role === "HOST";
+    const containerId = isHost ? "host-container" : "feed-container";
+    const container = document.getElementById(containerId);
+
+    // 清除占位符
+    const placeholder = container.querySelector(".text-center");
+    if (placeholder) placeholder.remove();
+
+    const item = document.createElement("div");
+    item.className = `feed-item border-l-4 ${isHost ? "border-amber-400 bg-amber-50" : "border-blue-300 bg-slate-50"} rounded-r-lg p-4`;
+
+    const preview = entry.content.length > 400 ? entry.content.slice(0, 400) + "..." : entry.content;
+    item.innerHTML = `
+        <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center gap-2">
+                <span class="role-badge role-${entry.role}">${entry.role}</span>
+                <span class="text-xs text-slate-500">${entry.time_str}</span>
+            </div>
+            <button class="text-xs text-blue-600 hover:underline expand-btn">展开</button>
+        </div>
+        <div class="content-preview text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">${escapeHtml(preview)}</div>
+    `;
+
+    // 展开/收起
+    const expandBtn = item.querySelector(".expand-btn");
+    const contentEl = item.querySelector(".content-preview");
+    expandBtn.addEventListener("click", () => {
+        const expanded = contentEl.classList.toggle("expanded");
+        expandBtn.textContent = expanded ? "收起" : "展开";
+        if (expanded) {
+            contentEl.textContent = entry.content;
+        } else {
+            contentEl.textContent = preview;
+        }
+    });
+
+    container.appendChild(item);
+    container.scrollTop = container.scrollHeight;
+
+    // 更新计数
+    if (isHost) {
+        const hc = document.getElementById("host-container").querySelectorAll(".feed-item").length;
+        document.getElementById("host-count").textContent = hc + " 次";
+    } else {
+        const fc = document.getElementById("feed-container").querySelectorAll(".feed-item").length;
+        document.getElementById("feed-count").textContent = fc + " 条";
+    }
+}
+
+function updateAgentCard(agentKey, progress) {
+    const card = document.querySelector(`[data-agent="${agentKey}"]`);
+    if (!card) return;
+
+    const statusText = {pending: "待命", running: "运行中", done: "完成"}[progress.status] || "未知";
+    card.querySelector(".agent-status").textContent = statusText;
+    card.querySelector(".agent-count").textContent = progress.current || 0;
+
+    card.classList.remove("active", "done");
+    if (progress.status === "running") card.classList.add("active");
+    else if (progress.status === "done") card.classList.add("done");
+}
+
+function updateStage(stage) {
+    const badge = document.getElementById("stage-badge");
+    badge.className = `stage-badge stage-${stage}`;
+    badge.textContent = STAGE_TEXT[stage] || stage;
+}
+
+function startTimer() {
+    startTime = Date.now();
+    const el = document.getElementById("elapsed-time");
+    timerInterval = setInterval(() => {
+        const secs = Math.floor((Date.now() - startTime) / 1000);
+        const m = Math.floor(secs / 60);
+        const s = secs % 60;
+        el.textContent = `已耗时 ${m}:${String(s).padStart(2, "0")}`;
+    }, 1000);
+}
+
+function stopTimer() {
+    if (timerInterval) clearInterval(timerInterval);
+}
+
+function showReport(data) {
+    const sec = document.getElementById("report-section");
+    sec.classList.remove("hidden");
+
+    const stats = data.stats || {};
+    document.getElementById("report-summary").innerHTML = `
+        <div class="mb-3">
+            <div class="text-lg font-semibold text-slate-800">${escapeHtml(data.title || "综合分析报告")}</div>
+            <div class="text-sm text-slate-500 mt-1">
+                共 ${stats.chapter_count || 0} 章 ·
+                正文 ${(stats.markdown_chars || 0).toLocaleString()} 字 ·
+                页面 ${((stats.html_chars || 0) / 1024).toFixed(1)} KB
+            </div>
+        </div>
+    `;
+
+    document.getElementById("view-report-btn").href = data.html_url;
+    document.getElementById("download-md-btn").href = data.md_url;
+
+    document.getElementById("show-iframe-btn").addEventListener("click", () => {
+        const wrap = document.getElementById("report-iframe-wrap");
+        const iframe = document.getElementById("report-iframe");
+        iframe.src = data.html_url;
+        wrap.classList.remove("hidden");
+    }, {once: true});
+}
+
+function escapeHtml(s) {
+    return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+</script>
+
+</body>
+</html>

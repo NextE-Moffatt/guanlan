@@ -38,19 +38,31 @@ class ForumState:
         self,
         host_threshold: int = 5,
         host_callback: Optional[Callable[[List[ForumEntry]], Awaitable[Optional[str]]]] = None,
+        observer: Optional[Callable[[ForumEntry], None]] = None,
     ):
         """
         Args:
             host_threshold: 累计多少条 agent 发言触发一次 Host 总结，默认 5
             host_callback: Host LLM 调用函数，接收最近 N 条发言，返回主持人发言文本
+            observer: 可选的观察者回调，每次 write 时同步调用，用于 SocketIO/UI 推送
         """
         self.entries: List[ForumEntry] = []
         self.host_threshold = host_threshold
         self.host_callback = host_callback
+        self.observer = observer  # 供前端订阅
 
         self._agent_speech_count = 0
         self._host_lock = asyncio.Lock()
         self._is_host_generating = False
+
+    def _notify(self, entry: ForumEntry) -> None:
+        """触发观察者回调（同步，任何异常都吞掉避免破坏主流程）"""
+        if self.observer is None:
+            return
+        try:
+            self.observer(entry)
+        except Exception as e:
+            print(f"⚠️  ForumState observer 异常: {e}")
 
     async def write(self, role: str, content: str) -> None:
         """
@@ -59,6 +71,7 @@ class ForumState:
         """
         entry = ForumEntry(timestamp=time.time(), role=role, content=content)
         self.entries.append(entry)
+        self._notify(entry)
         print(f"📝 [{role}] {content[:80]}...")
 
         if role in ("INSIGHT", "MEDIA", "QUERY"):
@@ -83,6 +96,7 @@ class ForumState:
                                     content=host_speech,
                                 )
                                 self.entries.append(host_entry)
+                                self._notify(host_entry)
                                 self._agent_speech_count = 0
                                 print(f"\n🎤 [HOST] {host_speech[:200]}...\n")
                         finally:

@@ -11,9 +11,9 @@
 
 from __future__ import annotations
 import asyncio
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Callable
 
-from .forum_state import ForumState
+from .forum_state import ForumState, ForumEntry
 from .forum_host import ForumHost
 from .agent_runner import run_agent_pipeline
 
@@ -22,6 +22,7 @@ async def run_opinion_pipeline(
     query: str,
     host_threshold: int = 5,
     config=None,
+    forum_observer: Optional[Callable[[ForumEntry], None]] = None,
 ) -> Dict[str, Any]:
     """
     异步运行完整的舆情分析流程：三 agent 并发 + ForumHost 引导 + 最终汇总。
@@ -46,10 +47,11 @@ async def run_opinion_pipeline(
     # 初始化 ForumHost
     host = ForumHost(config=config)
 
-    # 创建 ForumState，绑定 host 回调
+    # 创建 ForumState，绑定 host 回调和观察者（用于 SocketIO 推送）
     forum_state = ForumState(
         host_threshold=host_threshold,
         host_callback=host.generate,
+        observer=forum_observer,
     )
 
     print(f"\n{'=' * 60}")

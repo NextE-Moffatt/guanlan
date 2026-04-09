@@ -11,7 +11,12 @@ final_reports/
 .venv/
 venv/
 BettaFish/
+BettaFish-fork/
 final_reports/
+
+# 但保留前端模板（templates/ 下的 HTML 是源代码不是产物）
+!templates/
+!templates/**
 
 # 生成的报告产物
 reports/
