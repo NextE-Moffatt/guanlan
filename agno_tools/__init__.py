@@ -35,6 +35,15 @@ from .db_query_tools import (
     call_insight_tool,
 )
 
+# MindSpider BroadTopicExtraction 接入（newsnow 热榜采集）
+from .news_collector import (
+    refresh_news,
+    collect_all_news,
+    search_news_title,
+    get_latest_news_by_source,
+    SOURCES as NEWS_SOURCES,
+)
+
 # 海外数据源工具（InsightAgent 国际版扩展）
 from .hackernews_tools import (
     search_hackernews,

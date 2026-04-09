@@ -190,6 +190,21 @@ SCHEMAS = {
             like_count INTEGER
         )
     """,
+    # BroadTopicExtraction 热榜新闻表（MindSpider 接入）
+    "daily_news": """
+        CREATE TABLE daily_news (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            news_id TEXT NOT NULL,
+            source_platform TEXT NOT NULL,
+            title TEXT NOT NULL,
+            url TEXT,
+            description TEXT,
+            crawl_date TEXT NOT NULL,
+            rank_position INTEGER,
+            add_ts INTEGER NOT NULL,
+            last_modify_ts INTEGER NOT NULL
+        )
+    """,
 }
 
 
