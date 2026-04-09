@@ -197,6 +197,24 @@ def api_report_file(task_id: str, filename: str):
     return send_from_directory(str(target_dir), filename)
 
 
+@app.route("/api/graph/<task_id>")
+def api_graph(task_id: str):
+    """返回指定任务的知识图谱 JSON"""
+    matching_dirs = [d for d in REPORTS_DIR.iterdir() if d.is_dir() and d.name.endswith(task_id)]
+    if not matching_dirs:
+        return jsonify({"ok": False, "error": "任务不存在"}), 404
+
+    graph_path = matching_dirs[0] / "graph.json"
+    if not graph_path.exists():
+        return jsonify({"ok": False, "error": "图谱不存在（可能任务未生成图谱）"}), 404
+
+    try:
+        data = json.loads(graph_path.read_text(encoding="utf-8"))
+        return jsonify({"ok": True, "graph": data})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # ============== SocketIO 事件 ==============
 
 @socketio.on("connect")
@@ -278,6 +296,13 @@ def run_pipeline_in_thread(query: str, threshold: int):
         (TASK.output_dir / "final_report.md").write_text(report["markdown"], encoding="utf-8")
         (TASK.output_dir / "final_report.html").write_text(report["html"], encoding="utf-8")
 
+        # 保存知识图谱
+        graph_data = report.get("graph", {"entities": [], "relations": []})
+        (TASK.output_dir / "graph.json").write_text(
+            json.dumps(graph_data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
         TASK.stage = "completed"
         TASK.running = False
 
@@ -287,6 +312,8 @@ def run_pipeline_in_thread(query: str, threshold: int):
             "stats": report["stats"],
             "html_url": f"/api/report/file/{TASK.task_id}/final_report.html",
             "md_url": f"/api/report/file/{TASK.task_id}/final_report.md",
+            "graph_url": f"/api/graph/{TASK.task_id}",
+            "has_graph": graph_data.get("stats", {}).get("entity_count", 0) > 0,
         })
 
         print(f"✅ 任务 {TASK.task_id} 完成")

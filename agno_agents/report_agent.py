@@ -29,6 +29,7 @@ from agno.models.openai import OpenAIChat
 
 from .report_styles import REPORT_CSS, CHART_JS_LIBS
 from .report_blocks import preprocess_custom_blocks
+from .knowledge_graph import KnowledgeGraphExtractor
 
 
 # 通用 OpenAI 客户端 role_map：兼容 DeepSeek/Qwen 等不识别 "developer" 角色的 API
@@ -550,6 +551,9 @@ class ReportAgent:
             markdown=True,
         )
 
+        # Stage 5.5: 知识图谱提取器
+        self.graph_extractor = KnowledgeGraphExtractor(config=config)
+
     async def _agent_run(self, agent: Agent, user_prompt: str) -> str:
         """统一的 agno agent 异步调用入口，自动剥取 content"""
         try:
@@ -902,11 +906,19 @@ class ReportAgent:
         # 阶段六：HTML 渲染
         html_text = self.render_html(markdown_text, query)
 
+        # 阶段七：知识图谱提取
+        try:
+            graph = await self.graph_extractor.extract(query, markdown_text)
+        except Exception as e:
+            print(f"⚠️  [Graph] 提取失败（不影响报告生成）: {e}")
+            graph = {"entities": [], "relations": [], "stats": {"entity_count": 0, "relation_count": 0}}
+
         total_chars = len(markdown_text)
         print(f"\n{'=' * 60}")
         print(f"  ✅ 报告生成完成")
         print(f"  Markdown 长度: {total_chars} 字符")
         print(f"  章节数: {len(chapters)}")
+        print(f"  知识图谱: {graph['stats'].get('entity_count', 0)} 实体 / {graph['stats'].get('relation_count', 0)} 关系")
         print(f"{'=' * 60}\n")
 
         return {
@@ -914,10 +926,13 @@ class ReportAgent:
             "markdown": markdown_text,
             "html": html_text,
             "outline": outline,
+            "graph": graph,
             "stats": {
                 "chapter_count": len(chapters),
                 "markdown_chars": total_chars,
                 "html_chars": len(html_text),
+                "entity_count": graph["stats"].get("entity_count", 0),
+                "relation_count": graph["stats"].get("relation_count", 0),
             },
         }
 

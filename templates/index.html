@@ -6,6 +6,8 @@
     <title>观澜 · 多智能体舆情分析系统</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+    <link href="https://unpkg.com/vis-network@9.1.9/styles/vis-network.min.css" rel="stylesheet">
     <style>
         body {
             font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -117,6 +119,17 @@
 
         .content-preview.expanded {
             -webkit-line-clamp: unset;
+        }
+
+        .graph-filter-btn {
+            transition: all 0.2s;
+            font-weight: 600;
+        }
+        .graph-filter-btn:hover {
+            transform: scale(1.05);
+        }
+        .graph-filter-btn.active {
+            box-shadow: 0 0 0 2px rgba(30, 58, 138, 0.3);
         }
     </style>
 </head>
@@ -263,6 +276,37 @@
             </div>
             <div id="report-iframe-wrap" class="mt-4 hidden">
                 <iframe id="report-iframe" class="w-full border border-slate-200 rounded-lg" style="height:800px"></iframe>
+            </div>
+        </div>
+    </section>
+
+    <!-- 知识图谱区（任务完成后显示） -->
+    <section id="graph-section" class="bg-white rounded-2xl shadow-sm border border-slate-200 mb-6 hidden">
+        <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between flex-wrap gap-2">
+            <div>
+                <h2 class="font-bold text-slate-800">🕸️ 知识图谱</h2>
+                <p class="text-xs text-slate-500 mt-1">从综合报告中自动抽取的核心实体与关系网络</p>
+            </div>
+            <div id="graph-stats" class="text-xs text-slate-500"></div>
+        </div>
+        <div class="px-6 py-3 border-b border-slate-100 flex items-center gap-2 flex-wrap text-xs">
+            <span class="text-slate-500">筛选类型：</span>
+            <button data-filter="all" class="graph-filter-btn active px-3 py-1 rounded-full bg-slate-800 text-white">全部</button>
+            <button data-filter="person" class="graph-filter-btn px-3 py-1 rounded-full bg-amber-100 text-amber-800">👤 人物</button>
+            <button data-filter="organization" class="graph-filter-btn px-3 py-1 rounded-full bg-blue-100 text-blue-800">🏢 组织</button>
+            <button data-filter="product" class="graph-filter-btn px-3 py-1 rounded-full bg-purple-100 text-purple-800">📦 产品</button>
+            <button data-filter="event" class="graph-filter-btn px-3 py-1 rounded-full bg-red-100 text-red-800">⚡ 事件</button>
+            <button data-filter="location" class="graph-filter-btn px-3 py-1 rounded-full bg-green-100 text-green-800">📍 地点</button>
+            <button data-filter="topic" class="graph-filter-btn px-3 py-1 rounded-full bg-slate-100 text-slate-700">💭 话题</button>
+            <div class="flex-1"></div>
+            <button id="graph-fit-btn" class="px-3 py-1 rounded bg-slate-100 text-slate-600 hover:bg-slate-200">🔍 重置视图</button>
+        </div>
+        <div class="p-4">
+            <div id="graph-container" style="height: 600px; border-radius: 8px; background: linear-gradient(135deg, #f8fafc 0%, #eff6ff 100%); border: 1px solid #e2e8f0;"></div>
+            <div id="graph-detail" class="mt-3 p-3 bg-slate-50 rounded-lg text-sm hidden">
+                <div class="font-bold text-slate-800 mb-1" id="graph-detail-title"></div>
+                <div class="text-slate-600" id="graph-detail-desc"></div>
+                <div class="text-xs text-slate-500 mt-2" id="graph-detail-meta"></div>
             </div>
         </div>
     </section>
@@ -484,6 +528,7 @@ function showReport(data) {
                 共 ${stats.chapter_count || 0} 章 ·
                 正文 ${(stats.markdown_chars || 0).toLocaleString()} 字 ·
                 页面 ${((stats.html_chars || 0) / 1024).toFixed(1)} KB
+                ${stats.entity_count ? ` · 知识图谱 ${stats.entity_count} 实体 / ${stats.relation_count} 关系` : ""}
             </div>
         </div>
     `;
@@ -497,7 +542,206 @@ function showReport(data) {
         iframe.src = data.html_url;
         wrap.classList.remove("hidden");
     }, {once: true});
+
+    // 加载知识图谱
+    if (data.has_graph && data.graph_url) {
+        loadGraph(data.graph_url);
+    }
 }
+
+/* ==================== 知识图谱 ==================== */
+
+const GRAPH_TYPE_CONFIG = {
+    person: { color: "#f59e0b", icon: "👤", label: "人物" },
+    organization: { color: "#3b82f6", icon: "🏢", label: "组织" },
+    product: { color: "#8b5cf6", icon: "📦", label: "产品" },
+    event: { color: "#ef4444", icon: "⚡", label: "事件" },
+    location: { color: "#10b981", icon: "📍", label: "地点" },
+    topic: { color: "#6b7280", icon: "💭", label: "话题" },
+};
+
+const SENTIMENT_BORDER = {
+    positive: "#10b981",
+    negative: "#ef4444",
+    neutral: "#94a3b8",
+    mixed: "#f59e0b",
+};
+
+let graphNetwork = null;
+let graphRawData = null;
+let graphCurrentFilter = "all";
+
+async function loadGraph(graphUrl) {
+    try {
+        const resp = await fetch(graphUrl);
+        const data = await resp.json();
+        if (!data.ok || !data.graph) {
+            console.warn("图谱加载失败", data);
+            return;
+        }
+        graphRawData = data.graph;
+        renderGraph(graphRawData);
+        document.getElementById("graph-section").classList.remove("hidden");
+
+        // 显示统计
+        const stats = graphRawData.stats || {};
+        const types = stats.entity_types || {};
+        const typeStr = Object.entries(types)
+            .map(([k, v]) => `${(GRAPH_TYPE_CONFIG[k] || {}).icon || ""} ${v}`)
+            .join(" · ");
+        document.getElementById("graph-stats").innerHTML = `
+            <span class="font-semibold">${stats.entity_count || 0}</span> 实体 ·
+            <span class="font-semibold">${stats.relation_count || 0}</span> 关系
+            ${typeStr ? "<br/>" + typeStr : ""}
+        `;
+    } catch (e) {
+        console.error("加载图谱出错", e);
+    }
+}
+
+function renderGraph(graph) {
+    const container = document.getElementById("graph-container");
+    if (!container || !graph) return;
+
+    const filter = graphCurrentFilter;
+    const visibleEntityIds = new Set(
+        graph.entities
+            .filter(e => filter === "all" || e.type === filter)
+            .map(e => e.id)
+    );
+
+    const nodes = graph.entities
+        .filter(e => visibleEntityIds.has(e.id))
+        .map(e => {
+            const cfg = GRAPH_TYPE_CONFIG[e.type] || GRAPH_TYPE_CONFIG.topic;
+            const size = 16 + (e.weight || 5) * 2;
+            return {
+                id: e.id,
+                label: `${cfg.icon} ${e.name}`,
+                title: `${e.name}\n类型：${cfg.label}\n${e.description || ""}`,
+                color: {
+                    background: cfg.color + "33",
+                    border: SENTIMENT_BORDER[e.sentiment] || cfg.color,
+                    highlight: { background: cfg.color + "66", border: cfg.color },
+                },
+                font: { color: "#1e293b", size: 13, face: "PingFang SC, sans-serif" },
+                shape: "dot",
+                size: size,
+                borderWidth: 3,
+                _entityData: e,
+            };
+        });
+
+    const edges = graph.relations
+        .filter(r => visibleEntityIds.has(r.source) && visibleEntityIds.has(r.target))
+        .map((r, idx) => ({
+            id: `e_${idx}`,
+            from: r.source,
+            to: r.target,
+            label: r.type,
+            title: r.evidence,
+            arrows: { to: { enabled: true, scaleFactor: 0.6 } },
+            color: { color: "#94a3b8", highlight: "#3b82f6" },
+            font: { size: 11, color: "#64748b", strokeWidth: 3, strokeColor: "#ffffff" },
+            width: (r.strength || 1) * 0.8,
+            smooth: { type: "continuous", roundness: 0.2 },
+            _relationData: r,
+        }));
+
+    const options = {
+        layout: {
+            improvedLayout: true,
+        },
+        physics: {
+            enabled: true,
+            barnesHut: {
+                gravitationalConstant: -3000,
+                centralGravity: 0.15,
+                springLength: 130,
+                springConstant: 0.04,
+                damping: 0.4,
+            },
+            stabilization: { iterations: 200 },
+        },
+        interaction: {
+            hover: true,
+            tooltipDelay: 200,
+            navigationButtons: false,
+            keyboard: false,
+        },
+    };
+
+    if (graphNetwork) {
+        graphNetwork.destroy();
+    }
+    graphNetwork = new vis.Network(container, { nodes, edges }, options);
+
+    // 点击节点显示详情
+    graphNetwork.on("click", (params) => {
+        if (params.nodes.length > 0) {
+            const nodeId = params.nodes[0];
+            const node = nodes.find(n => n.id === nodeId);
+            if (node && node._entityData) {
+                showGraphDetail(node._entityData);
+            }
+        } else if (params.edges.length > 0) {
+            const edgeId = params.edges[0];
+            const edge = edges.find(e => e.id === edgeId);
+            if (edge && edge._relationData) {
+                showGraphRelationDetail(edge._relationData);
+            }
+        }
+    });
+}
+
+function showGraphDetail(entity) {
+    const cfg = GRAPH_TYPE_CONFIG[entity.type] || GRAPH_TYPE_CONFIG.topic;
+    const sentimentText = {
+        positive: "正面",
+        negative: "负面",
+        neutral: "中性",
+        mixed: "混合",
+    }[entity.sentiment] || "中性";
+
+    document.getElementById("graph-detail").classList.remove("hidden");
+    document.getElementById("graph-detail-title").innerHTML = `${cfg.icon} ${escapeHtml(entity.name)}`;
+    document.getElementById("graph-detail-desc").textContent = entity.description || "（无描述）";
+    document.getElementById("graph-detail-meta").innerHTML = `
+        类型：${cfg.label} ·
+        重要度：${entity.weight}/10 ·
+        舆情态度：<span class="font-semibold">${sentimentText}</span>
+    `;
+}
+
+function showGraphRelationDetail(relation) {
+    document.getElementById("graph-detail").classList.remove("hidden");
+    document.getElementById("graph-detail-title").innerHTML = `🔗 关系：${escapeHtml(relation.type)}`;
+    document.getElementById("graph-detail-desc").textContent = relation.evidence || "（无证据）";
+    document.getElementById("graph-detail-meta").innerHTML = `
+        从 <strong>${escapeHtml(relation.source)}</strong> →
+        到 <strong>${escapeHtml(relation.target)}</strong> ·
+        强度：${relation.strength}/5
+    `;
+}
+
+// 类型筛选按钮
+document.querySelectorAll(".graph-filter-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+        document.querySelectorAll(".graph-filter-btn").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+        graphCurrentFilter = btn.dataset.filter;
+        if (graphRawData) {
+            renderGraph(graphRawData);
+        }
+    });
+});
+
+// 重置视图按钮
+document.getElementById("graph-fit-btn").addEventListener("click", () => {
+    if (graphNetwork) {
+        graphNetwork.fit({ animation: { duration: 500, easingFunction: "easeInOutQuad" } });
+    }
+});
 
 function escapeHtml(s) {
     return String(s)
