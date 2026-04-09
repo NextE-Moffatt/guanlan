@@ -23,8 +23,9 @@ from flask_socketio import SocketIO, emit
 # ============== 前置 patch，必须在导入 agno 之前 ==============
 from agno_team import _agno_setup  # noqa: F401
 
-from agno_team.forum_state import ForumEntry
+from agno_team.forum_state import ForumEntry, ForumState
 from agno_team.opinion_team import run_opinion_pipeline
+from agno_team.agent_runner import TaskCancelled
 
 
 # ============== Flask 应用 ==============
@@ -47,11 +48,12 @@ class TaskState:
         self.task_id: Optional[str] = None
         self.query: Optional[str] = None
         self.start_time: Optional[datetime] = None
-        self.stage: str = "idle"  # idle | analyzing | reporting | completed | failed
+        self.stage: str = "idle"  # idle | analyzing | reporting | completed | failed | cancelled
         self.agent_progress: Dict[str, Dict[str, int]] = {}
         self.forum_entries: list = []
         self.error: Optional[str] = None
         self.output_dir: Optional[Path] = None
+        self.forum_state = None  # 当前任务的 ForumState 引用，便于调用 cancel()
 
     def reset(self, query: str):
         self.running = True
@@ -66,10 +68,20 @@ class TaskState:
         }
         self.forum_entries = []
         self.error = None
+        self.forum_state = None
 
         safe_query = query[:30].replace(" ", "_").replace("/", "_")
         self.output_dir = REPORTS_DIR / f"{safe_query}_{self.task_id}"
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def request_cancel(self) -> bool:
+        """请求取消当前任务，返回是否成功标记"""
+        if not self.running:
+            return False
+        if self.forum_state is not None:
+            self.forum_state.cancel()
+            return True
+        return False
 
 
 TASK = TaskState()
@@ -159,6 +171,23 @@ def api_entries():
     return jsonify({"entries": TASK.forum_entries})
 
 
+@app.route("/api/cancel", methods=["POST"])
+def api_cancel():
+    """请求取消当前任务"""
+    if not TASK.running:
+        return jsonify({"ok": False, "error": "当前没有运行中的任务"}), 400
+
+    success = TASK.request_cancel()
+    if success:
+        emit_event("cancel_requested", {"task_id": TASK.task_id})
+        return jsonify({
+            "ok": True,
+            "task_id": TASK.task_id,
+            "message": "已请求取消，任务将在下一个检查点停止",
+        })
+    return jsonify({"ok": False, "error": "无法取消（任务可能尚未真正启动）"}), 400
+
+
 @app.route("/api/report/latest")
 def api_report_latest():
     """获取最新生成的报告信息"""
@@ -195,6 +224,103 @@ def api_report_file(task_id: str, filename: str):
         abort(404)
 
     return send_from_directory(str(target_dir), filename)
+
+
+@app.route("/api/history")
+def api_history():
+    """扫描 reports/web/ 目录，返回所有历史任务（按时间倒序）"""
+    items = []
+    if not REPORTS_DIR.exists():
+        return jsonify({"items": []})
+
+    for d in sorted(REPORTS_DIR.iterdir(), key=lambda p: p.name, reverse=True):
+        if not d.is_dir():
+            continue
+        # 解析目录名：{safe_query}_{timestamp}
+        # timestamp 格式 YYYYMMDD_HHMMSS（15 位）
+        name = d.name
+        if len(name) < 16 or name[-15] != "_":
+            continue
+        safe_query = name[:-16]
+        task_id = name[-15:]
+
+        html_path = d / "final_report.html"
+        md_path = d / "final_report.md"
+        graph_path = d / "graph.json"
+        meta_path = d / "meta.json"
+
+        # 优先从 meta.json 读取（如果有）
+        title = None
+        query = safe_query.replace("_", " ")
+        chapter_count = 0
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                title = meta.get("title")
+                query = meta.get("query") or query
+                chapter_count = meta.get("chapter_count", 0)
+            except Exception:
+                pass
+
+        # 状态判断
+        if html_path.exists():
+            status = "completed"
+        elif (d / "insight_report.md").exists() or (d / "media_report.md").exists():
+            status = "partial"
+        else:
+            status = "incomplete"
+
+        # 解析时间戳
+        try:
+            ts_dt = datetime.strptime(task_id, "%Y%m%d_%H%M%S")
+            created_at = ts_dt.isoformat()
+            display_time = ts_dt.strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            created_at = ""
+            display_time = task_id
+
+        items.append({
+            "task_id": task_id,
+            "query": query,
+            "title": title or query,
+            "status": status,
+            "created_at": created_at,
+            "display_time": display_time,
+            "has_html": html_path.exists(),
+            "has_md": md_path.exists(),
+            "has_graph": graph_path.exists(),
+            "chapter_count": chapter_count,
+            "html_url": f"/api/report/file/{task_id}/final_report.html" if html_path.exists() else None,
+            "md_url": f"/api/report/file/{task_id}/final_report.md" if md_path.exists() else None,
+            "graph_url": f"/api/graph/{task_id}" if graph_path.exists() else None,
+        })
+
+    return jsonify({"items": items, "total": len(items)})
+
+
+@app.route("/api/history/<task_id>")
+def api_history_detail(task_id: str):
+    """加载某个历史任务的完整数据（论坛日志、Host 发言等）"""
+    matching_dirs = [d for d in REPORTS_DIR.iterdir() if d.is_dir() and d.name.endswith(task_id)]
+    if not matching_dirs:
+        return jsonify({"ok": False, "error": "任务不存在"}), 404
+
+    target_dir = matching_dirs[0]
+    forum_log_path = target_dir / "forum_log.txt"
+    host_path = target_dir / "host_speeches.md"
+
+    forum_log = forum_log_path.read_text(encoding="utf-8") if forum_log_path.exists() else ""
+    host_md = host_path.read_text(encoding="utf-8") if host_path.exists() else ""
+
+    return jsonify({
+        "ok": True,
+        "task_id": task_id,
+        "forum_log": forum_log[:50000],  # 限制大小
+        "host_speeches": host_md[:30000],
+        "html_url": f"/api/report/file/{task_id}/final_report.html",
+        "md_url": f"/api/report/file/{task_id}/final_report.md",
+        "graph_url": f"/api/graph/{task_id}",
+    })
 
 
 @app.route("/api/graph/<task_id>")
@@ -257,13 +383,17 @@ def run_pipeline_in_thread(query: str, threshold: int):
                     "progress": TASK.agent_progress[role_lower],
                 })
 
-        emit_event("stage_update", {"stage": "analyzing", "message": "三 Agent 并发分析中..."})
+        emit_event("stage_update", {"stage": "analyzing", "message": "三路智能体并发分析中..."})
+
+        def hold_state(fs: ForumState):
+            TASK.forum_state = fs
 
         result = loop.run_until_complete(
             run_opinion_pipeline(
                 query=query,
                 host_threshold=threshold,
                 forum_observer=observer,
+                forum_state_holder=hold_state,
             )
         )
 
@@ -303,6 +433,21 @@ def run_pipeline_in_thread(query: str, threshold: int):
             encoding="utf-8",
         )
 
+        # 保存任务元数据（供历史列表读取）
+        meta = {
+            "task_id": TASK.task_id,
+            "query": query,
+            "title": report.get("title", ""),
+            "completed_at": datetime.now().isoformat(),
+            "duration_seconds": int((datetime.now() - TASK.start_time).total_seconds())
+                if TASK.start_time else 0,
+            **report.get("stats", {}),
+        }
+        (TASK.output_dir / "meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
         TASK.stage = "completed"
         TASK.running = False
 
@@ -318,13 +463,28 @@ def run_pipeline_in_thread(query: str, threshold: int):
 
         print(f"✅ 任务 {TASK.task_id} 完成")
 
+    except TaskCancelled as e:
+        print(f"🛑 任务被用户取消: {e}")
+        TASK.stage = "cancelled"
+        TASK.running = False
+        TASK.error = "任务已被用户取消"
+        emit_event("task_cancelled", {"task_id": TASK.task_id, "message": str(e)})
+
     except Exception as e:
         tb = traceback.format_exc()
-        print(f"❌ 任务失败: {e}\n{tb}")
-        TASK.stage = "failed"
-        TASK.running = False
-        TASK.error = str(e)
-        emit_event("task_failed", {"error": str(e), "traceback": tb[:2000]})
+        # asyncio.gather 会把 TaskCancelled 包成 ExceptionGroup 或直接传出
+        if "TaskCancelled" in tb or isinstance(e, TaskCancelled):
+            print(f"🛑 任务被用户取消")
+            TASK.stage = "cancelled"
+            TASK.running = False
+            TASK.error = "任务已被用户取消"
+            emit_event("task_cancelled", {"task_id": TASK.task_id, "message": "任务已被用户取消"})
+        else:
+            print(f"❌ 任务失败: {e}\n{tb}")
+            TASK.stage = "failed"
+            TASK.running = False
+            TASK.error = str(e)
+            emit_event("task_failed", {"error": str(e), "traceback": tb[:2000]})
 
 
 # ============== 入口 ==============

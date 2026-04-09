@@ -23,6 +23,7 @@ async def run_opinion_pipeline(
     host_threshold: int = 5,
     config=None,
     forum_observer: Optional[Callable[[ForumEntry], None]] = None,
+    forum_state_holder: Optional[Callable[["ForumState"], None]] = None,
 ) -> Dict[str, Any]:
     """
     异步运行完整的舆情分析流程：三 agent 并发 + ForumHost 引导 + 最终汇总。
@@ -53,6 +54,13 @@ async def run_opinion_pipeline(
         host_callback=host.generate,
         observer=forum_observer,
     )
+
+    # 通知外部持有者（用于支持任务取消）
+    if forum_state_holder is not None:
+        try:
+            forum_state_holder(forum_state)
+        except Exception:
+            pass
 
     print(f"\n{'=' * 60}")
     print(f"  舆情分析任务启动")

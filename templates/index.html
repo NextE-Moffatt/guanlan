@@ -131,6 +131,20 @@
         .graph-filter-btn.active {
             box-shadow: 0 0 0 2px rgba(30, 58, 138, 0.3);
         }
+
+        .stage-cancelled { background: #fee2e2; color: #991b1b; }
+
+        #history-panel.open {
+            transform: translateX(0);
+        }
+
+        .history-item {
+            transition: all 0.2s;
+        }
+        .history-item:hover {
+            transform: translateX(-2px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+        }
     </style>
 </head>
 <body>
@@ -141,9 +155,14 @@
     <header class="mb-8">
         <div class="flex items-center justify-between mb-2">
             <h1 class="text-3xl font-bold brand-gradient">🌊 观澜</h1>
-            <div class="flex items-center gap-2 text-sm text-slate-500">
-                <span id="conn-dot" class="pulse-dot" style="background:#94a3b8"></span>
-                <span id="conn-status">未连接</span>
+            <div class="flex items-center gap-3 text-sm">
+                <button id="history-btn" class="px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-700 hover:bg-slate-50 hover:border-slate-300 transition-all flex items-center gap-1.5">
+                    📚 历史报告 <span id="history-count" class="text-xs text-slate-400">·</span>
+                </button>
+                <div class="flex items-center gap-2 text-slate-500">
+                    <span id="conn-dot" class="pulse-dot" style="background:#94a3b8"></span>
+                    <span id="conn-status">未连接</span>
+                </div>
             </div>
         </div>
         <p class="text-slate-600 mb-1">多智能体舆情分析系统 · 三路并发 · 主持人段落级引导 · 自动综合成稿</p>
@@ -176,6 +195,12 @@
                     class="px-8 py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white font-semibold rounded-xl hover:from-blue-700 hover:to-purple-700 transition-all shadow-sm hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                     🚀 开始观澜
+                </button>
+                <button
+                    id="cancel-btn"
+                    class="hidden px-6 py-3 bg-red-600 text-white font-semibold rounded-xl hover:bg-red-700 transition-all shadow-sm hover:shadow-md"
+                >
+                    ⏹ 取消任务
                 </button>
             </div>
 
@@ -317,6 +342,21 @@
 
 </div>
 
+<!-- 历史报告侧边栏 -->
+<div id="history-overlay" class="fixed inset-0 bg-black/40 z-40 hidden" onclick="closeHistory()"></div>
+<aside id="history-panel" class="fixed top-0 right-0 w-96 h-full bg-white shadow-2xl z-50 transform translate-x-full transition-transform duration-300 flex flex-col">
+    <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+        <div>
+            <h3 class="font-bold text-slate-800">📚 历史报告</h3>
+            <p class="text-xs text-slate-500 mt-1" id="history-panel-stats">加载中...</p>
+        </div>
+        <button onclick="closeHistory()" class="text-slate-400 hover:text-slate-600 text-xl">✕</button>
+    </div>
+    <div id="history-list" class="flex-1 overflow-y-auto p-4 space-y-3">
+        <div class="text-center text-slate-400 py-8 text-sm">加载中...</div>
+    </div>
+</aside>
+
 <script>
 /* ==================== 状态管理 ==================== */
 const STAGE_TEXT = {
@@ -325,6 +365,7 @@ const STAGE_TEXT = {
     reporting: "综合成稿中",
     completed: "已完成",
     failed: "失败",
+    cancelled: "已取消",
 };
 
 let startTime = null;
@@ -360,6 +401,8 @@ socket.on("task_started", (data) => {
     clearFeeds();
     updateStage("analyzing");
     startTimer();
+    document.getElementById("start-btn").classList.add("hidden");
+    document.getElementById("cancel-btn").classList.remove("hidden");
 });
 
 socket.on("stage_update", (data) => {
@@ -378,15 +421,36 @@ socket.on("task_completed", (data) => {
     updateStage("completed");
     stopTimer();
     showReport(data);
-    document.getElementById("start-btn").disabled = false;
+    resetActionButtons();
+    refreshHistoryCount();  // 完成后刷新历史计数
 });
 
 socket.on("task_failed", (data) => {
     updateStage("failed");
     stopTimer();
     alert("任务失败：" + data.error);
-    document.getElementById("start-btn").disabled = false;
+    resetActionButtons();
 });
+
+socket.on("task_cancelled", (data) => {
+    updateStage("cancelled");
+    stopTimer();
+    resetActionButtons();
+});
+
+socket.on("cancel_requested", (data) => {
+    document.getElementById("cancel-btn").disabled = true;
+    document.getElementById("cancel-btn").textContent = "⏳ 取消中...";
+});
+
+function resetActionButtons() {
+    document.getElementById("start-btn").classList.remove("hidden");
+    document.getElementById("start-btn").disabled = false;
+    const cancelBtn = document.getElementById("cancel-btn");
+    cancelBtn.classList.add("hidden");
+    cancelBtn.disabled = false;
+    cancelBtn.textContent = "⏹ 取消任务";
+}
 
 /* ==================== UI 操作 ==================== */
 document.getElementById("start-btn").addEventListener("click", async () => {
@@ -401,6 +465,7 @@ document.getElementById("start-btn").addEventListener("click", async () => {
     document.getElementById("start-btn").disabled = true;
     document.getElementById("threshold-display").textContent = threshold;
     document.getElementById("report-section").classList.add("hidden");
+    document.getElementById("graph-section").classList.add("hidden");
 
     try {
         const resp = await fetch("/api/start", {
@@ -418,6 +483,115 @@ document.getElementById("start-btn").addEventListener("click", async () => {
         document.getElementById("start-btn").disabled = false;
     }
 });
+
+document.getElementById("cancel-btn").addEventListener("click", async () => {
+    if (!confirm("确定要取消当前任务吗？\n\n（任务会在下一个检查点停止，已生成的内容会保留）")) {
+        return;
+    }
+    try {
+        const resp = await fetch("/api/cancel", {method: "POST"});
+        const data = await resp.json();
+        if (!data.ok) {
+            alert("取消失败：" + data.error);
+        }
+    } catch (e) {
+        alert("网络错误：" + e.message);
+    }
+});
+
+/* ==================== 历史报告 ==================== */
+
+document.getElementById("history-btn").addEventListener("click", openHistory);
+
+async function openHistory() {
+    document.getElementById("history-overlay").classList.remove("hidden");
+    document.getElementById("history-panel").classList.add("open");
+    await loadHistoryList();
+}
+
+function closeHistory() {
+    document.getElementById("history-overlay").classList.add("hidden");
+    document.getElementById("history-panel").classList.remove("open");
+}
+
+async function loadHistoryList() {
+    const list = document.getElementById("history-list");
+    list.innerHTML = '<div class="text-center text-slate-400 py-8 text-sm">加载中...</div>';
+
+    try {
+        const resp = await fetch("/api/history");
+        const data = await resp.json();
+        const items = data.items || [];
+
+        document.getElementById("history-panel-stats").textContent = `共 ${items.length} 份历史报告`;
+
+        if (items.length === 0) {
+            list.innerHTML = '<div class="text-center text-slate-400 py-8 text-sm">还没有历史报告<br/><span class="text-xs">完成第一次分析后会出现在这里</span></div>';
+            return;
+        }
+
+        list.innerHTML = items.map(item => {
+            const statusBadge = {
+                completed: '<span class="text-xs px-2 py-0.5 rounded bg-green-100 text-green-700">已完成</span>',
+                partial: '<span class="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-700">部分完成</span>',
+                incomplete: '<span class="text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-500">未完成</span>',
+            }[item.status] || "";
+
+            const graphBadge = item.has_graph
+                ? '<span class="text-xs px-2 py-0.5 rounded bg-purple-100 text-purple-700">🕸️ 图谱</span>'
+                : "";
+
+            const buttons = [];
+            if (item.has_html) {
+                buttons.push(`<a href="${item.html_url}" target="_blank" class="text-xs px-2.5 py-1 bg-blue-600 text-white rounded hover:bg-blue-700">查看 HTML</a>`);
+            }
+            if (item.has_md) {
+                buttons.push(`<a href="${item.md_url}" download class="text-xs px-2.5 py-1 bg-slate-200 text-slate-700 rounded hover:bg-slate-300">下载 MD</a>`);
+            }
+            if (item.has_graph) {
+                buttons.push(`<button onclick="loadHistoryGraph('${item.task_id}')" class="text-xs px-2.5 py-1 bg-purple-600 text-white rounded hover:bg-purple-700">查看图谱</button>`);
+            }
+
+            return `
+                <div class="history-item p-3 bg-slate-50 border border-slate-200 rounded-lg cursor-default">
+                    <div class="flex items-start justify-between gap-2 mb-1">
+                        <div class="font-semibold text-slate-800 text-sm leading-tight flex-1" title="${escapeHtml(item.title)}">${escapeHtml((item.title || item.query || "").slice(0, 50))}</div>
+                    </div>
+                    <div class="flex items-center gap-2 mb-2 flex-wrap">
+                        ${statusBadge}
+                        ${graphBadge}
+                        ${item.chapter_count ? `<span class="text-xs text-slate-500">${item.chapter_count} 章</span>` : ""}
+                    </div>
+                    <div class="text-xs text-slate-400 mb-2">${item.display_time}</div>
+                    <div class="flex gap-1.5 flex-wrap">${buttons.join("")}</div>
+                </div>
+            `;
+        }).join("");
+
+    } catch (e) {
+        list.innerHTML = `<div class="text-center text-red-500 py-8 text-sm">加载失败：${e.message}</div>`;
+    }
+}
+
+async function refreshHistoryCount() {
+    try {
+        const resp = await fetch("/api/history");
+        const data = await resp.json();
+        document.getElementById("history-count").textContent = `· ${data.items.length}`;
+    } catch (e) {
+        // 忽略
+    }
+}
+
+async function loadHistoryGraph(taskId) {
+    closeHistory();
+    document.getElementById("graph-section").classList.remove("hidden");
+    document.getElementById("graph-section").scrollIntoView({behavior: "smooth", block: "start"});
+    await loadGraph(`/api/graph/${taskId}`);
+}
+
+// 启动时刷新一次历史计数
+refreshHistoryCount();
 
 function clearFeeds() {
     document.getElementById("feed-container").innerHTML = "";

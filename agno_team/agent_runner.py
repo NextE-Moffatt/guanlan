@@ -23,6 +23,17 @@ from agno.models.openai import OpenAIChat
 from .forum_state import ForumState, format_host_speech_for_prompt
 
 
+class TaskCancelled(Exception):
+    """用户请求取消任务时抛出"""
+    pass
+
+
+def _check_cancelled(forum_state: Optional[ForumState], stage: str = ""):
+    """在关键执行点检查取消标志，被取消时抛出 TaskCancelled"""
+    if forum_state is not None and forum_state.cancelled:
+        raise TaskCancelled(f"任务已被用户取消（{stage}）")
+
+
 _ROLE_MAP = {
     "system": "system",
     "user": "user",
@@ -300,6 +311,7 @@ async def run_agent_pipeline(
         )
 
     print(f"\n🚀 [{agent_name}] 启动，主题: {query}")
+    _check_cancelled(forum_state, f"{agent_name} 启动前")
 
     # ===== 阶段一：规划报告结构 =====
     structure_raw = await _call_llm_via_engine(config_prefix, SYSTEM_PROMPT_REPORT_STRUCTURE, query)
@@ -308,6 +320,7 @@ async def run_agent_pipeline(
         paragraphs_outline = []
 
     print(f"📋 [{agent_name}] 规划了 {len(paragraphs_outline)} 个段落")
+    _check_cancelled(forum_state, f"{agent_name} 大纲完成")
 
     # ===== 阶段二：逐段搜索 + 总结 + 反思 =====
     paragraph_results: List[Dict[str, str]] = []
@@ -320,6 +333,7 @@ async def run_agent_pipeline(
         para_input = json.dumps({"title": title, "content": content}, ensure_ascii=False)
 
         print(f"🔍 [{agent_name}] 段落 {idx}/{len(paragraphs_outline)}: {title}")
+        _check_cancelled(forum_state, f"{agent_name} 段落 {idx}")
 
         # 2a. 首次搜索决策（insight 类型在 system prompt 末尾追加海外平台说明）
         search_system = SYSTEM_PROMPT_FIRST_SEARCH + (overseas_extra if overseas_extra else "")
@@ -405,6 +419,7 @@ async def run_agent_pipeline(
         })
 
     # ===== 阶段三：最终报告格式化 =====
+    _check_cancelled(forum_state, f"{agent_name} 生成最终报告前")
     print(f"📝 [{agent_name}] 生成最终报告...")
     formatting_input = json.dumps(paragraph_results, ensure_ascii=False)
     final_report = await _call_llm_via_engine(config_prefix, SYSTEM_PROMPT_REPORT_FORMATTING, formatting_input)

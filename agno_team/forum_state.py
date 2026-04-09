@@ -54,6 +54,11 @@ class ForumState:
         self._agent_speech_count = 0
         self._host_lock = asyncio.Lock()
         self._is_host_generating = False
+        self.cancelled = False  # 用户取消标志（agent_runner 在调用 LLM 前会检查）
+
+    def cancel(self) -> None:
+        """请求取消任务"""
+        self.cancelled = True
 
     def _notify(self, entry: ForumEntry) -> None:
         """触发观察者回调（同步，任何异常都吞掉避免破坏主流程）"""
