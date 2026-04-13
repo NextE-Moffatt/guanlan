@@ -236,10 +236,10 @@ def api_history():
     for d in sorted(REPORTS_DIR.iterdir(), key=lambda p: p.name, reverse=True):
         if not d.is_dir():
             continue
-        # 解析目录名：{safe_query}_{timestamp}
-        # timestamp 格式 YYYYMMDD_HHMMSS（15 位）
+        # 解析目录名：{safe_query}_{YYYYMMDD_HHMMSS}
+        # timestamp 是 15 个字符，分隔符 _ 在倒数第 16 位
         name = d.name
-        if len(name) < 16 or name[-15] != "_":
+        if len(name) < 17 or name[-16] != "_":
             continue
         safe_query = name[:-16]
         task_id = name[-15:]
