@@ -152,15 +152,60 @@ DB_DIALECT=sqlite
 DB_NAME=/绝对路径/agno-mirofish/data/mock_yuqing.db
 ```
 
-### 4. 初始化 Mock 数据库（首次运行 InsightAgent 必做）
+### 4. 初始化数据库
+
+**选择 A：SQLite Mock（开箱即用，无真实数据）**
 
 ```bash
 python scripts/init_mock_db.py
 ```
 
-这会创建 `data/mock_yuqing.db`，包含 14 张表（7 内容表 + 7 评论表）和约 100 条围绕"Claude Code"主题的假数据。
+创建 `data/mock_yuqing.db`，14 张表（7 内容表 + 7 评论表）+ `daily_news`，约 100 条围绕 "Claude Code" 的假数据。适合首次验证功能。
 
-如果你想跑真实数据，需要自己部署 MediaCrawler PostgreSQL 数据库（参考 [BettaFish 文档](https://github.com/666ghj/BettaFish)）。
+**选择 B：PostgreSQL（推荐，支持真实数据持久化）**
+
+```bash
+# 1. 启动 PostgreSQL（Docker 方式最简单）
+docker run -d --name guanlan-pg \
+  -p 5432:5432 \
+  -e POSTGRES_PASSWORD=yourpassword \
+  -e POSTGRES_DB=yuqing \
+  -v guanlan_pg_data:/var/lib/postgresql/data \
+  postgres:15
+
+# 或本地安装（macOS）
+# brew install postgresql@15
+# brew services start postgresql@15
+# createdb yuqing
+
+# 2. 等数据库启动（Docker 约 5 秒）
+sleep 5
+
+# 3. 执行建表脚本
+psql -h localhost -U postgres -d yuqing -f scripts/init_postgres.sql
+# 会提示输入密码（上面设置的 yourpassword）
+
+# 4. 修改 .env 切换到 PostgreSQL
+# 把前面 .env 里的 DB_DIALECT=sqlite 改成：
+#   DB_DIALECT=postgresql
+#   DB_HOST=127.0.0.1
+#   DB_PORT=5432
+#   DB_USER=postgres
+#   DB_PASSWORD=yourpassword
+#   DB_NAME=yuqing
+#   DB_CHARSET=utf8
+
+# 5. 拉一次每日热榜，让 daily_news 有真实数据
+python scripts/refresh_news.py
+```
+
+**切换方案**：InsightAgent 会根据 `.env` 里的 `DB_DIALECT` 自动切换 SQLite/PostgreSQL/MySQL，代码无需改动。
+
+**后续往数据库塞数据**：
+- 每天热榜（12 平台 ~300 条标题）：`python scripts/refresh_news.py`（建议加 cron 每小时跑一次）
+- 完整社交媒体数据（微博/B站/知乎帖子和评论）：需要部署 MediaCrawler 爬虫（参考 [BettaFish/MindSpider](https://github.com/666ghj/BettaFish)），配置登录 cookie 后运行
+
+**空表也能用**：数据库是空的时候 InsightAgent 会返回"暂无相关内容"，不会报错；配合 Tavily（QueryAgent）和 Bocha（MediaAgent）的实时搜索仍然能生成完整报告。
 
 ---
 
@@ -249,7 +294,9 @@ agno-mirofish/
 │   └── opinion_team.py          # 三 agent asyncio.gather 调度
 │
 ├── scripts/
-│   └── init_mock_db.py          # 初始化 SQLite mock 数据库
+│   ├── init_mock_db.py          # 初始化 SQLite mock 数据库
+│   ├── init_postgres.sql        # PostgreSQL 建表脚本（15 张表）
+│   └── refresh_news.py          # 从 newsnow 拉取 12 平台热榜写入 daily_news
 │
 ├── run_single_agent.py          # 单 agent 命令行入口
 ├── run_full_pipeline.py         # 完整流程命令行入口
