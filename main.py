@@ -32,7 +32,15 @@ from agno_team.agent_runner import TaskCancelled
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config["SECRET_KEY"] = "agno-mirofish-web-secret"
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+# async_mode 优先级：eventlet > threading
+# eventlet 性能更好且兼容性更强；threading 在部分 Werkzeug 版本上有 WebSocket 500 bug
+try:
+    import eventlet  # noqa: F401
+    _async_mode = "eventlet"
+except ImportError:
+    _async_mode = "threading"
+
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode=_async_mode)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 REPORTS_DIR = PROJECT_ROOT / "reports" / "web"
