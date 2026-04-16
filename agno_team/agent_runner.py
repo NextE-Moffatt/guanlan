@@ -367,9 +367,8 @@ async def run_agent_pipeline(
             else summary_raw
         )
 
-        # ⭐ 写入 forum_state（可能触发 Host）
-        if forum_state is not None:
-            await forum_state.write(forum_role, paragraph_state)
+        # 首次总结不写入 forum_state（避免与深化后的内容重复）
+        # 只在下方反思深化完成后写入最终版本
 
         # 2d. 反思：基于当前段落生成补充搜索
         reflection_input = json.dumps({
