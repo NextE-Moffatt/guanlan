@@ -332,29 +332,51 @@ def api_history_detail(task_id: str):
 def _parse_forum_log_file(path: Path) -> list:
     """
     把 forum_log.txt 解析为结构化数组。
-    每行格式：[HH:MM:SS] [ROLE] content...
-    返回：[{"time_str": "17:20:22", "role": "QUERY", "content": "..."}, ...]
+
+    forum_log.txt 的每条发言可能跨多行：
+    - 第一行：[HH:MM:SS] [ROLE] content首行...
+    - 后续行：没有 [HH:MM:SS] 前缀的续行
+
+    解析策略：遇到新的 [HH:MM:SS] [ROLE] 标记就开始新条目，
+    中间的行都追加到当前条目的 content。
     """
     import re
     if not path.exists():
         return []
 
+    HEADER_RE = re.compile(r"^\[(\d{2}:\d{2}:\d{2})\]\s*\[(\w+)\]\s*(.*)")
+
     entries = []
+    current = None
     text = path.read_text(encoding="utf-8")
+
     for line in text.split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        m = re.match(r"\[(\d{2}:\d{2}:\d{2})\]\s*\[(\w+)\]\s*(.*)", line)
+        m = HEADER_RE.match(line)
         if m:
-            time_str, role, content = m.groups()
+            # 保存上一条
+            if current is not None:
+                entries.append(current)
+            time_str, role, first_line = m.groups()
             # 还原转义的换行符
-            content = content.replace("\\n", "\n")
-            entries.append({
+            content = first_line.replace("\\n", "\n")
+            current = {
                 "time_str": time_str,
                 "role": role,
                 "content": content,
-            })
+            }
+        elif current is not None:
+            # 续行：追加到当前条目
+            restored = line.replace("\\n", "\n")
+            current["content"] += "\n" + restored
+
+    # 别忘了最后一条
+    if current is not None:
+        entries.append(current)
+
+    # 清理：去掉 content 首尾空白
+    for e in entries:
+        e["content"] = e["content"].strip()
+
     return entries
 
 
