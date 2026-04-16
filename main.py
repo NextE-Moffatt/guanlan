@@ -315,20 +315,47 @@ def api_history_detail(task_id: str):
 
     target_dir = matching_dirs[0]
     forum_log_path = target_dir / "forum_log.txt"
-    host_path = target_dir / "host_speeches.md"
 
-    forum_log = forum_log_path.read_text(encoding="utf-8") if forum_log_path.exists() else ""
-    host_md = host_path.read_text(encoding="utf-8") if host_path.exists() else ""
+    # 把 forum_log.txt 解析为结构化数组（前端友好）
+    forum_entries = _parse_forum_log_file(forum_log_path)
 
     return jsonify({
         "ok": True,
         "task_id": task_id,
-        "forum_log": forum_log[:50000],  # 限制大小
-        "host_speeches": host_md[:30000],
+        "forum_entries": forum_entries,
         "html_url": f"/api/report/file/{task_id}/final_report.html",
         "md_url": f"/api/report/file/{task_id}/final_report.md",
         "graph_url": f"/api/graph/{task_id}",
     })
+
+
+def _parse_forum_log_file(path: Path) -> list:
+    """
+    把 forum_log.txt 解析为结构化数组。
+    每行格式：[HH:MM:SS] [ROLE] content...
+    返回：[{"time_str": "17:20:22", "role": "QUERY", "content": "..."}, ...]
+    """
+    import re
+    if not path.exists():
+        return []
+
+    entries = []
+    text = path.read_text(encoding="utf-8")
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r"\[(\d{2}:\d{2}:\d{2})\]\s*\[(\w+)\]\s*(.*)", line)
+        if m:
+            time_str, role, content = m.groups()
+            # 还原转义的换行符
+            content = content.replace("\\n", "\n")
+            entries.append({
+                "time_str": time_str,
+                "role": role,
+                "content": content,
+            })
+    return entries
 
 
 @app.route("/api/graph/<task_id>")
