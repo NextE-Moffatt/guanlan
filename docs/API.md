@@ -264,15 +264,38 @@ GET /api/history/{task_id}
 {
   "ok": true,
   "task_id": "20260410_143025",
-  "forum_log": "[14:30:25] [INSIGHT] 通过分析微博数据...\n[14:31:25] [HOST] ...",
-  "host_speeches": "## Host 发言 #1\n\n...",
+  "forum_entries": [
+    {
+      "time_str": "14:30:25",
+      "role": "INSIGHT",
+      "content": "## 核心发现概述\n通过分析微博数据，发现..."
+    },
+    {
+      "time_str": "14:31:25",
+      "role": "HOST",
+      "content": "**一、事件梳理**\n各Agent的发言显示..."
+    },
+    {
+      "time_str": "14:32:10",
+      "role": "QUERY",
+      "content": "## 新闻事实核查\n根据 Tavily 搜索结果..."
+    }
+  ],
   "html_url": "/api/report/file/20260410_143025/final_report.html",
   "md_url": "/api/report/file/20260410_143025/final_report.md",
   "graph_url": "/api/graph/20260410_143025"
 }
 ```
 
-**说明**：`forum_log` 和 `host_speeches` 限制最大返回 50000 / 30000 字符。
+**`forum_entries` 字段说明**：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `time_str` | string | 发言时间 `HH:MM:SS` |
+| `role` | string | `INSIGHT` / `MEDIA` / `QUERY` / `HOST` / `SYSTEM` |
+| `content` | string | 发言正文（Markdown 格式，已还原换行符） |
+
+**说明**：`role=HOST` 的条目即为主持人引导发言，前端可自行按 role 分组展示。
 
 ---
 
